@@ -354,45 +354,155 @@ int load_vgm(char * vgm_filename)
 	song.data = malloc(vgm_size);
 	uint8_t *sp = song.data;
 	
+	/*************** playback state functions **************/
 	playback_state_t state;
+	playback_state_t prv;
 	init_playback_state(&state);
+	init_playback_state(&prv);
 	
-	fm_patch_t prv_fm_patch_tbl[6];
-	for (int i = 0; i < 6; i++)
-		init_fm_patch(&prv_fm_patch_tbl[i]);
-	int fm_patch_flags = 0;
+	/* flushes fm patches if any of them changed */
 	void flush_fm_patches()
 	{
 		for (int chn = 0; chn < 6; chn++)
 		{
-			if (fm_patch_flags & (1 << chn))
-			{
-				fm_patch_t *old = &prv_fm_patch_tbl[chn];
-				fm_patch_t *new = &state.fm.patch[chn];
-				if (!fm_patch_cmp(old,new)) continue;
-				
-				unsigned new_id = add_fm_patch(new);
-				memcpy(old, new, sizeof(*new));
-				
-				*sp++ = 3 + (chn << 4) + (new_id < 0x100 ? 0 : 1);
-				*sp++ = new_id & 0xff;
-				if (new_id >= 0x100) *sp++ = new_id >> 8;
-			}
+			fm_patch_t *old = &prv.fm.patch[chn];
+			fm_patch_t *new = &state.fm.patch[chn];
+			if (!fm_patch_cmp(old,new)) continue;
+			
+			unsigned new_id = add_fm_patch(new);
+			memcpy(old, new, sizeof(*new));
+			
+			*sp++ = 3 + (chn << 4) + (new_id < 0x100 ? 0 : 1);
+			*sp++ = new_id & 0xff;
+			if (new_id >= 0x100) *sp++ = new_id >> 8;
 		}
-		
-		fm_patch_flags = 0;
 	}
 	
-	unsigned psg_latch = 0;
-	psg_state_t prv_psg;
-	memset(&prv_psg,0,sizeof(prv_psg));
+	/* flushes fm freqs if any of them changed */
+	void flush_fm_freqs()
+	{
+		/******** normal fm channels *********/
+		for (int chn = 0; chn < 6; chn++)
+		{
+			uint16_t *old = &prv.fm.freq[chn];
+			uint16_t *new = &state.fm.freq[chn];
+			
+			int lodiff = ((*old)&0xff) != ((*new)&0xff);
+			int hidiff = ((*old)>>8) != ((*new)>>8);
+			
+			if (lodiff && hidiff)
+			{
+				*sp++ = (chn<<4) + 7;
+				*sp++ = (*new)&0xff;
+				*sp++ = (*new)>>8;
+			}
+			else if (lodiff)
+			{
+				*sp++ = (chn<<4) + 5;
+				*sp++ = (*new)&0xff;
+			}
+			else if (hidiff)
+			{
+				*sp++ = (chn<<4) + 6;
+				*sp++ = (*new)>>8;
+			}
+			
+			*old = *new;
+		}
+		
+		/********* ext.chn3 frequencies *************/
+		for (int op = 0; op < 3; op++)
+		{
+			uint16_t *old = &prv.fm.extd_freq[op];
+			uint16_t *new = &state.fm.extd_freq[op];
+			
+			int lodiff = ((*old)&0xff) != ((*new)&0xff);
+			int hidiff = ((*old)>>8) != ((*new)>>8);
+			
+			if (lodiff && hidiff)
+			{
+				*sp++ = (op<<4) + 0xf;
+				*sp++ = (*new)&0xff;
+				*sp++ = (*new)>>8;
+			}
+			else if (lodiff)
+			{
+				*sp++ = (op<<4) + 0xd;
+				*sp++ = (*new)&0xff;
+			}
+			else if (hidiff)
+			{
+				*sp++ = (op<<4) + 0xe;
+				*sp++ = (*new)>>8;
+			}
+			
+			*old = *new;
+		}
+	}
+	
+	/* flushes FM patches, freqs, and keyon state */
+	void flush_fm_keyon_state()
+	{
+		flush_fm_patches();
+		flush_fm_freqs();
+		
+		for (int chn = 0; chn < 6; chn++)
+		{
+			uint8_t *old = &prv.fm.keyon[chn];
+			uint8_t *new = &state.fm.keyon[chn];
+			
+			if (*old != *new)
+			{
+				*old = *new;
+				if (*new == 0x00)
+					*sp++ = (chn<<4) + 0;
+				else if (*new == 0xf0)
+					*sp++ = (chn<<4) + 1;
+				else
+				{
+					*sp++ = (chn<<4) + 2;
+					*sp++ = *new;
+				}
+			}
+		}
+	}
+	
+	/* fully flush fm state */
+	void flush_fm_state()
+	{
+		flush_fm_keyon_state();
+		
+		if (prv.fm.chn3_mode != state.fm.chn3_mode)
+		{
+			prv.fm.chn3_mode = state.fm.chn3_mode;
+			
+			*sp++ = 0x60 + (state.fm.chn3_mode ? 1 : 0);
+		}
+		
+		if (prv.fm.dac_enable != state.fm.dac_enable)
+		{
+			prv.fm.dac_enable = state.fm.dac_enable;
+			
+			*sp++ = 0x62 + (state.fm.dac_enable ? 1 : 0);
+		}
+		
+		if (prv.fm.lfo != state.fm.lfo)
+		{
+			prv.fm.lfo = state.fm.lfo;
+			
+			*sp++ = 0x64;
+			*sp++ = state.fm.lfo;
+		}
+	}
+	
+	/* fully flush psg state */
 	void flush_psg_state()
 	{
 		for (int chn = 0; chn < 4; chn++)
 		{
 			/* volume */
 			uint8_t *v = &state.psg.volume[chn];
-			uint8_t *pv = &prv_psg.volume[chn];
+			uint8_t *pv = &prv.psg.volume[chn];
 			if (*v != *pv)
 			{
 				*pv = *v;
@@ -403,7 +513,7 @@ int load_vgm(char * vgm_filename)
 			uint16_t *f = &state.psg.freq[chn];
 			uint8_t fl = (*f) & 0xff;
 			uint8_t fh = (*f) >> 8;
-			uint16_t *pf = &prv_psg.freq[chn];
+			uint16_t *pf = &prv.psg.freq[chn];
 			uint8_t pfl = (*pf) & 0xff;
 			uint8_t pfh = (*pf) >> 8;
 			if (chn != 3)
@@ -434,6 +544,24 @@ int load_vgm(char * vgm_filename)
 		}
 	}
 	
+	/* fully flush all state (used on wait commands/loop/end) */
+	void flush_playback_state()
+	{
+		flush_fm_state();
+		flush_psg_state();
+		
+		if (prv.sample_freq != state.sample_freq)
+		{
+			prv.sample_freq = state.sample_freq;
+			
+			*sp++ = 0x65;
+			*sp++ = (state.sample_freq&0xff);
+			*sp++ = (state.sample_freq>>8);
+		}
+	}
+	
+	unsigned psg_latch = 0;
+	
 	unsigned active_stream_id = -1; /* the stream that last started a sample */
 	uint8_t stream_active_flags[0x100/8];
 	uint8_t stream_bank_tbl[0x100];
@@ -458,8 +586,7 @@ int load_vgm(char * vgm_filename)
 		/****************** END COMMAND *********************/
 		if (c == 0x66)
 		{ /* end */
-			flush_fm_patches();
-			flush_psg_state();
+			flush_playback_state();
 			*sp++ = 0x6b;
 			break;
 		}
@@ -514,14 +641,9 @@ int load_vgm(char * vgm_filename)
 			
 			stream_freq_tbl[sid] = freq;
 			
-			/* i wanted to put this in the sample start code, but vgms apparently init the frequency THEN start the stream... */
-			if (freq != state.sample_freq)
-			{
+			/* set */
+			if ((stream_active_flags[sid/8] & (1 << (sid&7))))
 				state.sample_freq = freq;
-				*sp++ = 0x65;
-				*sp++ = freq & 0xff;
-				*sp++ = freq >> 8;
-			}
 		}
 		else if (c == 0x94)
 		{ /* stop stream */
@@ -606,7 +728,6 @@ int load_vgm(char * vgm_filename)
 				/********************* fm patch control ***********************/
 				if (is_fm_patch_register(part,r))
 				{
-					fm_patch_flags |= (1<<chn);
 					fm_patch_t *p = &state.fm.patch[chn];
 					
 					if (rr == 0x30)
@@ -631,29 +752,17 @@ int load_vgm(char * vgm_filename)
 				/*********************** everything else ********************/
 				else
 				{
-					flush_fm_patches();
-					
 					/****** frequency (todo: combined low/high command) ******/
 					if (r >= 0xa0 && r < 0xa7)
 					{
 						uint16_t *freq = &state.fm.freq[chn];
 						if (!(r & 4))
 						{ /* low */
-							if (v != (*freq & 0xff))
-							{
-								*freq = (*freq & 0xff00) | v;
-								*sp++ = 5 + (chn << 4);
-								*sp++ = v;
-							}
+							*freq = (*freq & 0xff00) | v;
 						}
 						else
 						{ /* high */
-							if ((v<<8) != (*freq & 0xff00))
-							{
-								*freq = (*freq & 0xff) | (v<<8);
-								*sp++ = 6 + (chn << 4);
-								*sp++ = v;
-							}
+							*freq = (*freq & 0xff) | (v<<8);
 						}
 					}
 					
@@ -663,21 +772,11 @@ int load_vgm(char * vgm_filename)
 						uint16_t *freq = &state.fm.extd_freq[r&3];
 						if (!(r & 4))
 						{ /* low */
-							if (v != (*freq & 0xff))
-							{
-								*freq = (*freq & 0xff00) | v;
-								*sp++ = 0xd + ((r&3)<<4);
-								*sp++ = v;
-							}
+							*freq = (*freq & 0xff00) | v;
 						}
 						else
 						{ /* high */
-							if ((v<<8) != (*freq & 0xff00))
-							{
-								*freq = (*freq & 0xff) | (v<<8);
-								*sp++ = 0xe + ((r&3)<<4);
-								*sp++ = v;
-							}
+							*freq = (*freq & 0xff) | (v<<8);
 						}
 					}
 					
@@ -693,19 +792,7 @@ int load_vgm(char * vgm_filename)
 						if (v != *ko)
 						{
 							*ko = v;
-							if (!v)
-							{ /* keyoff all */
-								*sp++ = 0 + (chn<<4);
-							}
-							else if (v == 0xf0)
-							{ /* keyon all */
-								*sp++ = 1 + (chn<<4);
-							}
-							else
-							{ /* other */
-								*sp++ = 2 + (chn<<4);
-								*sp++ = v;
-							}
+							flush_fm_keyon_state();
 						}
 					}
 					
@@ -713,11 +800,7 @@ int load_vgm(char * vgm_filename)
 					if (r == 0x27)
 					{
 						v &= 0x40;
-						if (v != state.fm.chn3_mode)
-						{
-							state.fm.chn3_mode = v;
-							*sp++ = v ? 0x61 : 0x60;
-						}
+						state.fm.chn3_mode = v;
 					}
 					
 					/********* dac toggle ********/
@@ -725,23 +808,14 @@ int load_vgm(char * vgm_filename)
 					{
 						v &= 0x80;
 						v >>= 7;
-						if (v != state.fm.dac_enable)
-						{
-							state.fm.dac_enable = v;
-							*sp++ = v ? 0x63 : 0x62;
-						}
+						state.fm.dac_enable = v;
 					}
 					
 					/******** lfo ***********/
 					if (r == 0x22)
 					{
 						v &= 0x0f;
-						if (v != state.fm.lfo)
-						{
-							state.fm.lfo = v;
-							*sp++ = 0x64;
-							*sp++ = v;
-						}
+						state.fm.lfo = v;
 					}
 				}
 			}
@@ -806,8 +880,7 @@ int load_vgm(char * vgm_filename)
 				vp++;
 			}
 			
-			flush_fm_patches();
-			flush_psg_state();
+			flush_playback_state();
 			
 			unsigned ntsc_frames = current_wait / NTSC_INTERVAL;
 			unsigned ntsc_extra = current_wait % NTSC_INTERVAL;
@@ -873,8 +946,7 @@ int load_vgm(char * vgm_filename)
 			}
 			else if (vp == vlp)
 			{
-				flush_fm_patches();
-				flush_psg_state();
+				flush_playback_state();
 				*sp++ = 0x6a;
 				loop_hit = 1;
 			}
