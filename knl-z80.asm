@@ -1291,14 +1291,10 @@ play:
 	call write_fm_keyon
 	
 @@sample_init:
-	ld hl,k_sample_init_flag
-	ld a,(hl)
-	and $c0
-	or b
+	ld a,(k_sample_init_flag)
 	ld (k_sample_active),a
 	
 	;set up sample pointer
-	ld a,(hl)
 	and $3f
 	ld e,a
 	ld d,0
