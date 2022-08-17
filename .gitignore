@@ -1,0 +1,12 @@
+*.bin
+*.o
+*.ln
+*.elf
+*.gen
+*.exe
+
+KNL-MODULE.asm
+
+knl-vgm-convert
+
+private-vgms
