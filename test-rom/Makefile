@@ -7,7 +7,7 @@ clean: knl-clean
 
 KNL_DIR := ../
 KNL_SONG_SLOTS := 2
-KNL_VGMS := ../private-vgms/*.vgm
+KNL_VGMS := ../test-vgms/*.vgm
 
 include $(KNL_DIR)Makefile
 
