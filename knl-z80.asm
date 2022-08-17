@@ -1312,12 +1312,6 @@ play:
 	ld (k_sample_ptr+2),a
 	
 	
-	; sample freq
-	ld a,(ix+ss_sample_freq+0)
-	ld (k_sample_freq+0),a
-	ld a,(ix+ss_sample_freq+1)
-	ld (k_sample_freq+1),a
-	
 	
 @@no_sample_init:
 	
@@ -1407,7 +1401,7 @@ play:
 @@no_chn3:
 	
 	
-	;;;;;;;;;;;;;; slot controlling channel 6 controls the dac mode
+	;;;;;;;;;;;;;; slot controlling channel 6 controls the dac mode and sample freq
 	
 	ld a,(k_fm_channel_ss+5)
 	cp $ff
@@ -1420,6 +1414,11 @@ play:
 	rlca
 	ld b,$2b
 	call fm_write_1
+	
+	ld a,(ix+ss_sample_freq+0)
+	ld (k_sample_freq+0),a
+	ld a,(ix+ss_sample_freq+1)
+	ld (k_sample_freq+1),a
 	
 @@no_dac_mode:
 	

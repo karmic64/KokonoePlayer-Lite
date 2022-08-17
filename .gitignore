@@ -10,3 +10,5 @@ KNL-MODULE.asm
 knl-vgm-convert
 
 private-vgms
+
+.fuse-hidden*
