@@ -130,12 +130,12 @@ knl_init::
 	
 	z80_comm #0 * 2
 	
+	z80_comm .arg_song_slot+3(sp)
+	
 	move.l .arg_song_id(sp),d0
 	z80_comm d0
 	lsr.w #8,d0
 	z80_comm d0
-	
-	z80_comm .arg_song_slot+3(sp)
 	
 	
 	bra z80_exit

@@ -128,19 +128,64 @@ sample_tbl_base dsb 3
 
 
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; reset handler/rst routines/irq handler
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; reset handler/rst routines
 
 
 	;reset stub
 	.orga 0
 	di
-	im 1
 	ld sp,STACK_POINTER
+	ld a,$ff
 	jr reset
 	
 	
+	
+	
+	;write byte a to ym register b
+	;(assumes hl' is $4000, bc' is the register and de' is the data)
+	.orga $8
+fm_write:
+	ex af,af'
+	ld a,b
+	exx
+	ld (bc),a
+	
+-:	bit 7,(hl)
+	jr nz,-
+	
+	ex af,af'
+	ld (de),a
+	exx
+	ret
+	
+
+
+
+	;write byte a to fm reg b, part 1
+	;assumes hl' is $4000
+	.orga $18
+fm_write_1:
+	ex af,af'
+	ld a,b
+	exx
+	ld (hl),a
+	
+-:	bit 7,(hl)
+	jr nz,-
+	
+	ex af,af'
+	inc l
+	ld (hl),a
+	dec l
+	exx
+	ret
+	
+	
+	
+	
+	
 	;read byte from banked pointer chl into a then step pointer
-	.orga 8
+	.orga $30
 get_byte:
 	ld a,(hl)
 	inc l
@@ -149,7 +194,7 @@ get_byte:
 	ret nz
 	ld h,$80
 	inc c
-	;now we are at $10, another good rst location
+	;now we are at $38, another good rst location
 	;sets bank to c
 set_bank:
 	push af
@@ -171,35 +216,6 @@ set_bank:
 	ld (hl),a
 	rrca
 	ld (hl),a
-	jr set_bank_exit
-	
-	
-	
-	;write byte a to ym register b
-	;(assumes hl' is $4000, bc' is the register and de' is the data)
-	.orga $28
-fm_write:
-	ex af,af'
-	ld a,b
-	exx
-	ld (bc),a
-	
--:	bit 7,(hl)
-	jr nz,-
-	
-	ex af,af'
-	ld (de),a
-	exx
-	ret
-	
-	
-	
-	
-	
-	
-	
-	;;;;;;
-set_bank_exit:
 	ld (hl),0
 	pop hl
 	pop af
@@ -208,7 +224,11 @@ set_bank_exit:
 	
 	
 	
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; reset
+	
+	
+	
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; reset
 	
 reset:
 	
@@ -216,7 +236,7 @@ reset:
 	ld (hl),$9f
 	ld (hl),$bf
 	ld (hl),$df
-	ld a,$ff
+	;ld a,$ff
 	ld (hl),a
 	
 	
@@ -245,14 +265,14 @@ reset:
 	
 	ld a,TIMER_VALUE >> 2
 	ld b,$24
-	call fm_write_1
+	rst fm_write_1
 	ld a,TIMER_VALUE & 3
 	inc b
-	call fm_write_1
+	rst fm_write_1
 	
 	ld a,$15
 	ld b,$27
-	call fm_write_1
+	rst fm_write_1
 	
 	
 	
@@ -261,7 +281,7 @@ reset:
 	
 main_loop:
 	
-	;;;;;;;;;;; idle/sample loop
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; idle/sample loop
 	ld hl,$4000
 @check_frame_again:
 	bit 0,(hl)
@@ -334,7 +354,7 @@ main_loop:
 	ld (k_sample_ptr+2),a
 	
 	
-	;;;;;;;;;;;;; frame hit, handle comms and play music
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; frame hit, handle comms and play music
 	
 @do_frame:
 	
@@ -346,10 +366,10 @@ main_loop:
 	ld a,(k_chn3_state)
 	or $15
 	ld b,$27
-	call fm_write_1
+	rst fm_write_1
 	
 	
-	;;;;;; comms
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; comms
 	
 	ld a,(k_comm_index)
 	ld c,a
@@ -375,66 +395,19 @@ main_loop:
 	.dw @@init
 	.dw @@stop
 	
-	;word - song id, byte - song slot
+	;;;;;;;;;;;;;;;;;;; cmd $00 init song: byte - song slot, word - song id
 @@init:
+	ld a,(bc)
+	inc c
+	call set_song_slot
+	
 	ld a,(bc)
 	ld e,a
 	inc c
 	ld a,(bc)
 	ld d,a
 	inc c
-	ld a,(bc)
-	inc c
 	push bc
-	call init_song
-	pop bc
-	jr @next_comm
-	
-	
-@@stop:
-	ld a,(bc)
-	inc c
-	push bc
-	call stop_song_slot
-	pop bc
-	jr @next_comm
-
-	
-@next_comm:
-	ld a,(comm_end_index)
-	cp c
-	jr nz,@comm_loop
-	ld (k_comm_index),a
-	
-@after_comms:
-	
-	
-	;;;;;;; play
-	
-	call play
-	
-	jp main_loop
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; init routine
-
-	;song slot in A, song id in DE
-init_song:
-	push de
-	call set_song_slot
-	pop de
 	
 	ld hl,(song_tbl_base)
 	ld a,(song_tbl_base+2)
@@ -460,238 +433,30 @@ init_song:
 	add hl,de
 	ld (hl),a
 	
-	
-	
 	;this song slot may already have occupied channels, so reset it to a regular state
-	jp give_up_channels
+	call give_up_channels
+	
+	pop bc
+	jr @next_comm
 	
 	
-	
-	
-	
-	
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; fm channel control routines
+	;;;;;;;;;;;;;;;;;; cmd $02 stop song slot: byte - song slot
+@@stop:
+	ld a,(bc)
+	inc c
+	push bc
+	call stop_song_slot
+	pop bc
+	jr @next_comm
 
-	;;;;;; most of the following routines expect:
-	;;;;;;	the song slot id in k_song_slot
-	;;;;;;	the song slot pointer in ix
-	;;;;;;	the channel id in k_fm_channel
-	;;;;;;	the channel-indexed pointer in iy
 	
+@next_comm:
+	ld a,(comm_end_index)
+	cp c
+	jr nz,@comm_loop
+	ld (k_comm_index),a
 	
-	
-	;sets up shadow regs and returns channel index in A
-init_fm_channel_write:
-	exx
-	ld hl,$4000
-	ld b,h
-	ld d,h
-	
-	ld c,l
-	ld e,1
-	
-	ld a,(k_fm_channel)
-	cp 3
-	jr c,+
-	ld c,2
-	ld e,3
-	sub 3
-+:
-	exx
-	ret
-	
-	
-	
-	;in A
-get_fm_keyoff_index:
-	ld a,(k_fm_channel)
-	cp 3
-	ret c
-	inc a
-	ret
-	
-	
-	
-	
-	
-	
-	;in A
-stop_song_slot:
-	call set_song_slot
-	
-stop_current_song_slot:
-	ld (ix+ss_flags),0
-	
-	
-give_up_channels:
-	;;;; FM channels
-	
-	ld iy,(k_song_slot_ptr)
-	ld hl,k_fm_channel_ss
-	xor a
-@loop:
-	ld (k_fm_channel),a
-	
-	ld a,(k_song_slot) ; the channel must be ours
-	cp (hl)
-	jr nz,@next
-	
-	ld (hl),$ff ;signal this channel is free
-	
-	call mute_fm_channel
-	
-	
-	ld a,(k_fm_channel) ;for channel 6, stop sample
-	sub 5
-	jr nz,+
-	ld (k_sample_active),a ;0
-+:
-	
-	
-@next:
-	inc hl
-	inc iy
-	ld a,(k_fm_channel)
-	inc a
-	cp 6
-	jr c,@loop
-	
-	
-	
-	.endasm
-	;;;; PSG
-	xor a
-	ld (ix+ss_psg_volume+0),a
-	ld (ix+ss_psg_volume+1),a
-	ld (ix+ss_psg_volume+2),a
-	ld (ix+ss_psg_volume+3),a
-	.asm
-	
-	
-	
-	ret
-	
-	
-	
-	
-	
-	
-mute_fm_channel:
-	;; mute the channel by setting its RRs to $0f and keying it off
-	call init_fm_channel_write
-	or $80
-	ld b,a
-	ld a,$ff
-	.rept 3
-		rst fm_write
-		inc b
-		inc b
-		inc b
-		inc b
-	.endr
-	rst fm_write
-	
-	call get_fm_keyoff_index
-	ld b,$28
-	jp fm_write_1	
-	
-	
-	
-	
-	
-	
-	
-	
-write_fm_patch:
-	ld e,(iy+ss_fm_patch_lo)
-	ld d,(iy+ss_fm_patch_hi)
-	ld hl,(fm_patch_tbl_base)
-	ld a,(fm_patch_tbl_base+2)
-	call indexed_read_68k_ptr
-	
-	call init_fm_channel_write
-	or $30
-	ld b,a
-	
-	.rept (4*7)-1
-		rst get_byte
-		rst fm_write
-		inc b
-		inc b
-		inc b
-		inc b
-	.endr
-	rst get_byte
-	rst fm_write
-	ld a,b
-	add $14
-	ld b,a
-	rst get_byte
-	rst fm_write
-	inc b
-	inc b
-	inc b
-	inc b
-	rst get_byte
-	rst fm_write
-	
-	ret
-	
-
-
-
-write_fm_freq:
-	call init_fm_channel_write
-	or $a4
-	ld b,a
-	
-	ld a,(iy+ss_fm_pitch_hi)
-	rst fm_write
-	dec b
-	dec b
-	dec b
-	dec b
-	ld a,(iy+ss_fm_pitch_lo)
-	rst fm_write
-	
-	ret
-	
-	
-	
-	;on entry to this routine, k_fm_channel is the operator, not the channel
-write_fm_3freq:
-	call init_fm_channel_write
-	or $ac
-	ld b,a
-	
-	ld a,(iy+ss_chn3_pitch_hi)
-	rst fm_write
-	dec b
-	dec b
-	dec b
-	dec b
-	ld a,(iy+ss_chn3_pitch_lo)
-	rst fm_write
-	
-	ret
-	
-	
-	
-	
-write_fm_keyon:
-	exx
-	ld hl,$4000
-	exx
-	
-	call get_fm_keyoff_index
-	or (iy+ss_fm_keyon)
-	ld b,$28
-	jp fm_write_1
-
-
-
-
-
+@after_comms:
 
 
 
@@ -756,7 +521,7 @@ play:
 	cp $60
 	jp c,@@@fm_channel
 	cp $6c
-	jp c,@@@misc_command
+	jr c,@@@misc_command
 	cp $70
 	jr c,@@@psg_freq_lo
 	cp $80
@@ -1251,7 +1016,7 @@ play:
 	exx
 	
 	ld b,$22
-	call fm_write_1
+	rst fm_write_1
 	
 	ld a,(k_song_slot)
 	ld (hl),a
@@ -1301,12 +1066,8 @@ play:
 	ld hl,(sample_tbl_base)
 	ld a,(sample_tbl_base+2)
 	call indexed_read_68k_ptr
-	ld a,l
-	ld (k_sample_start+0),a
-	ld (k_sample_ptr+0),a
-	ld a,h
-	ld (k_sample_start+1),a
-	ld (k_sample_ptr+1),a
+	ld (k_sample_start+0),hl
+	ld (k_sample_ptr+0),hl
 	ld a,c
 	ld (k_sample_start+2),a
 	ld (k_sample_ptr+2),a
@@ -1347,17 +1108,6 @@ play:
 	
 	
 	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
 	;;;;;;;;;;;;;;;;;;;;;;;;;;;;; next song slot
 	
 @@next_song_slot:	
@@ -1367,6 +1117,12 @@ play:
 	ld a,(k_song_slot)
 	dec a
 	jp p,@song_slot_loop
+	
+	
+	
+	
+	
+	
 	
 	
 	
@@ -1396,7 +1152,7 @@ play:
 	ld (k_chn3_state),a
 	or $05
 	ld b,$27
-	call fm_write_1
+	rst fm_write_1
 	
 @@no_chn3:
 	
@@ -1413,12 +1169,11 @@ play:
 	rlca
 	rlca
 	ld b,$2b
-	call fm_write_1
+	rst fm_write_1
 	
-	ld a,(ix+ss_sample_freq+0)
-	ld (k_sample_freq+0),a
-	ld a,(ix+ss_sample_freq+1)
-	ld (k_sample_freq+1),a
+	ld l,(ix+ss_sample_freq+0)
+	ld h,(ix+ss_sample_freq+1)
+	ld (k_sample_freq+0),hl
 	
 @@no_dac_mode:
 	
@@ -1521,8 +1276,244 @@ play:
 	
 	
 	
+	jp main_loop
+	
+
+
+
+
+	
+	
+	
+	
+	
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; fm channel control routines
+
+	;;;;;; most of the following routines expect:
+	;;;;;;	the song slot id in k_song_slot
+	;;;;;;	the song slot pointer in ix
+	;;;;;;	the channel id in k_fm_channel
+	;;;;;;	the channel-indexed pointer in iy
+	
+	
+	
+	;sets up shadow regs and returns channel index in A
+init_fm_channel_write:
+	exx
+	ld hl,$4000
+	ld b,h
+	ld d,h
+	
+	ld c,l
+	ld e,1
+	
+	ld a,(k_fm_channel)
+	cp 3
+	jr c,+
+	ld c,2
+	ld e,3
+	sub 3
++:
+	exx
 	ret
 	
+	
+	
+	;in A
+get_fm_keyoff_index:
+	ld a,(k_fm_channel)
+	cp 3
+	ret c
+	inc a
+	ret
+	
+	
+	
+	
+	
+	
+	;in A
+stop_song_slot:
+	call set_song_slot
+	
+stop_current_song_slot:
+	ld (ix+ss_flags),0
+	
+	
+give_up_channels:
+	;;;; FM channels
+	
+	ld iy,(k_song_slot_ptr)
+	ld hl,k_fm_channel_ss
+	xor a
+@loop:
+	ld (k_fm_channel),a
+	
+	ld a,(k_song_slot) ; the channel must be ours
+	cp (hl)
+	jr nz,@next
+	
+	ld (hl),$ff ;signal this channel is free
+	
+	call mute_fm_channel
+	
+	
+	ld a,(k_fm_channel) ;for channel 6, stop sample
+	sub 5
+	jr nz,+
+	ld (k_sample_active),a ;0
++:
+	
+	
+@next:
+	inc hl
+	inc iy
+	ld a,(k_fm_channel)
+	inc a
+	cp 6
+	jr c,@loop
+	
+	
+	
+	.endasm
+	;;;; PSG
+	xor a
+	ld (ix+ss_psg_volume+0),a
+	ld (ix+ss_psg_volume+1),a
+	ld (ix+ss_psg_volume+2),a
+	ld (ix+ss_psg_volume+3),a
+	.asm
+	
+	
+	
+	ret
+	
+	
+	
+	
+	
+	
+mute_fm_channel:
+	;; mute the channel by setting its RRs to $0f and keying it off
+	call init_fm_channel_write
+	or $80
+	ld b,a
+	ld a,$ff
+	.rept 3
+		rst fm_write
+		inc b
+		inc b
+		inc b
+		inc b
+	.endr
+	rst fm_write
+	
+	call get_fm_keyoff_index
+	ld b,$28
+	rst fm_write_1
+	
+	ret
+	
+	
+	
+	
+	
+	
+	
+	
+write_fm_patch:
+	ld e,(iy+ss_fm_patch_lo)
+	ld d,(iy+ss_fm_patch_hi)
+	ld hl,(fm_patch_tbl_base)
+	ld a,(fm_patch_tbl_base+2)
+	call indexed_read_68k_ptr
+	
+	call init_fm_channel_write
+	or $30
+	ld b,a
+	
+	.rept (4*7)-1
+		rst get_byte
+		rst fm_write
+		inc b
+		inc b
+		inc b
+		inc b
+	.endr
+	rst get_byte
+	rst fm_write
+	ld a,b
+	add $14
+	ld b,a
+	rst get_byte
+	rst fm_write
+	inc b
+	inc b
+	inc b
+	inc b
+	rst get_byte
+	rst fm_write
+	
+	ret
+	
+
+
+
+write_fm_freq:
+	call init_fm_channel_write
+	or $a4
+	ld b,a
+	
+	ld a,(iy+ss_fm_pitch_hi)
+	rst fm_write
+	dec b
+	dec b
+	dec b
+	dec b
+	ld a,(iy+ss_fm_pitch_lo)
+	rst fm_write
+	
+	ret
+	
+	
+	
+	;on entry to this routine, k_fm_channel is the operator, not the channel
+write_fm_3freq:
+	call init_fm_channel_write
+	or $ac
+	ld b,a
+	
+	ld a,(iy+ss_chn3_pitch_hi)
+	rst fm_write
+	dec b
+	dec b
+	dec b
+	dec b
+	ld a,(iy+ss_chn3_pitch_lo)
+	rst fm_write
+	
+	ret
+	
+	
+	
+	
+write_fm_keyon:
+	exx
+	ld hl,$4000
+	exx
+	
+	call get_fm_keyoff_index
+	or (iy+ss_fm_keyon)
+	ld b,$28
+	rst fm_write_1
+	
+	ret
+
+
+
+
+
 
 
 
@@ -1610,26 +1601,6 @@ iy_equals_ix_plus_a:
 
 
 
-
-
-
-	;write byte a to fm reg b, part 1
-	;assumes hl' is $4000
-fm_write_1:
-	ex af,af'
-	ld a,b
-	exx
-	ld (hl),a
-	
--:	bit 7,(hl)
-	jr nz,-
-	
-	ex af,af'
-	inc l
-	ld (hl),a
-	dec l
-	exx
-	ret
 
 
 
