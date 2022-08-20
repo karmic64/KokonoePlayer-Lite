@@ -7,7 +7,7 @@ KokonoePlayer-Lite is yet another VGM-player sound driver for the Sega Genesis/M
 To use KokonoePlayer-Lite, you need the following:
 
 * `make`, and a Makefile that builds your project. Other build systems are unsupported.
-* A **native** C compiler (preferably `gcc`), to compile the module converter and data generator.
+* A **native** C compiler (preferably `gcc`), to compile the module converter.
 * [vasm](http://sun.hasenbraten.de/vasm/), to assemble the 68000 part. When running `make`, use `SYNTAX=mot CPU=m68k`. The output executable should be named `vasmm68k_mot`.
 * [WLA-DX](https://www.villehelin.com/wla.html), to assemble the Z80 part.
 * A 68000 ELF-compatible linker, to link the KokonoePlayer-Lite output file into your ROM.
