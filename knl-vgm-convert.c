@@ -28,7 +28,7 @@ PSG COMMANDS:
 	$80-$bf - psg channel volume (channel in upper nybble, volume in lower nybble)
 
 FM COMMANDS:
-	$00-$5f, where lower nybble is <$c - fm channel control (upper nybble is channel id)
+	$00-$5f - fm channel control (upper nybble is channel id)
 		$x0 - keyoff all operators
 		$x1 - keyon all operators
 		$x2 $yy - set keyon state to $yy
@@ -37,10 +37,10 @@ FM COMMANDS:
 		$x5 $yy - set low frequency to $yy
 		$x6 $yy - set high frequency to $yy
 		$x7 $yyyy - set frequency to $yyyy
-	$00-$2f, where lower nybble is >=$0c - chn3 operator control (upper nybble is operator id - 1)
-		$xd $yy - set low frequency to $yy
-		$xe $yy - set high frequency to $yy
-		$xf $yyyy - set frequency to $yyyy
+	$00-$2f - chn3 operator control (upper nybble is operator id - 1)
+		$x8 $yy - set low frequency to $yy
+		$x9 $yy - set high frequency to $yy
+		$xa $yyyy - set frequency to $yyyy
 	$60 - normal chn.3 mode
 	$61 - extd. chn.3 mode
 	$62 - DAC disable
@@ -421,18 +421,18 @@ int load_vgm(char * vgm_filename)
 			
 			if (lodiff && hidiff)
 			{
-				*sp++ = (op<<4) + 0xf;
+				*sp++ = (op<<4) + 0xa;
 				*sp++ = (*new)&0xff;
 				*sp++ = (*new)>>8;
 			}
 			else if (lodiff)
 			{
-				*sp++ = (op<<4) + 0xd;
+				*sp++ = (op<<4) + 0x8;
 				*sp++ = (*new)&0xff;
 			}
 			else if (hidiff)
 			{
-				*sp++ = (op<<4) + 0xe;
+				*sp++ = (op<<4) + 0x9;
 				*sp++ = (*new)>>8;
 			}
 			

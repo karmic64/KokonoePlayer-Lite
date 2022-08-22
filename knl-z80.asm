@@ -69,7 +69,7 @@ ss_size db
 
 
 ;;;;;;;;;;;;;;;;; private variables
-.enum $0c00
+.enum $0a00
 k_temp dsb 4
 k_comm_index db
 
@@ -826,11 +826,7 @@ play:
 	.dw @@@@freq_lo
 	.dw @@@@freq_hi
 	.dw @@@@freq
-	.dw 0
-	.dw 0
-	.dw 0
-	.dw 0
-	.dw 0
+	
 	.dw @@@@3freq_lo
 	.dw @@@@3freq_hi
 	.dw @@@@3freq
