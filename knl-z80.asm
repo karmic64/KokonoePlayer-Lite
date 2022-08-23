@@ -91,6 +91,7 @@ k_lfo_ss db
 k_prv_psg_noise db
 
 k_sample_init_flag db
+k_sample_init_id db
 
 ;;;;
 
@@ -662,9 +663,10 @@ play:
 @@@@sample_loop:
 	ld b,$c0
 +:
-	rst get_byte
-	or b
 	ld (k_sample_init_flag),a
+	
+	rst get_byte
+	ld (k_sample_init_id),a
 	
 	jp @@vgm_data_read_loop
 	
@@ -1056,7 +1058,7 @@ play:
 	ld (k_sample_active),a
 	
 	;set up sample pointer
-	and $3f
+	ld a,(k_sample_init_id)
 	ld e,a
 	ld d,0
 	ld hl,(sample_tbl_base)

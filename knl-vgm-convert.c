@@ -1032,6 +1032,24 @@ int main(int argc, char *argv[])
 		,songs_size,fm_patches_size,samples_size);
 	printf("Total size: %lu bytes (%.1f KiB).\n", total_size,total_size/1024.0);
 	
+	int toomany = 0;
+	if (songs > 0x4000)
+	{
+		printf("Too many songs! (max %u)\n",0x4000);
+		toomany++;
+	}
+	if (fm_patches > 0x4000)
+	{
+		printf("Too many FM patches! (max %u)\n",0x4000);
+		toomany++;
+	}
+	if (samples > 0x100)
+	{
+		printf("Too many samples! (max %u)\n",0x40);
+		toomany++;
+	}
+	if (toomany) return EXIT_FAILURE;
+	
 	
 	
 	/******************************** OUTPUT FILE ***********************************/
