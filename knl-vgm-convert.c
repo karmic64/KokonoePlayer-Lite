@@ -57,11 +57,22 @@ FM COMMANDS:
 
 #define min(a,b) (((a) < (b)) ? (a) : (b))
 
+/* see vgm spec */
 #define NTSC_INTERVAL 735
 #define PAL_INTERVAL 882
 
+/* for NTSC, but PAL isn't different enough to worry about it */
 #define Z80_CLOCK 3579545.0
 #define Z80_CLOCKS_PER_SAMPLE 104.0
+
+
+
+/* indexed_read_68k_ptr accepts a 16-bit id, and shifts out the upper 2 bits */
+#define MAX_SONGS 0x4000
+#define MAX_FM_PATCHES 0x4000
+
+/* k_sample_init_id is 1 byte long (this could be trivially fixed if a need ever arises */
+#define MAX_SAMPLES 0x100
 
 
 
@@ -1033,19 +1044,19 @@ int main(int argc, char *argv[])
 	printf("Total size: %lu bytes (%.1f KiB).\n", total_size,total_size/1024.0);
 	
 	int toomany = 0;
-	if (songs > 0x4000)
+	if (songs > MAX_SONGS)
 	{
-		printf("Too many songs! (max %u)\n",0x4000);
+		printf("Too many songs! (max %u)\n",MAX_SONGS);
 		toomany++;
 	}
-	if (fm_patches > 0x4000)
+	if (fm_patches > MAX_FM_PATCHES)
 	{
-		printf("Too many FM patches! (max %u)\n",0x4000);
+		printf("Too many FM patches! (max %u)\n",MAX_FM_PATCHES);
 		toomany++;
 	}
-	if (samples > 0x100)
+	if (samples > MAX_SAMPLES)
 	{
-		printf("Too many samples! (max %u)\n",0x40);
+		printf("Too many samples! (max %u)\n",MAX_SAMPLES);
 		toomany++;
 	}
 	if (toomany) return EXIT_FAILURE;
