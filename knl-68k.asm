@@ -11,7 +11,7 @@ z80_comm_buf = Z80+$1f00
 
 
 
-	section .code,code
+	section .text,code
 	
 	db "KokonoePlayer-Lite v0.90 coded by karmic"
 	align 1
