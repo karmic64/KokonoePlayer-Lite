@@ -42,6 +42,8 @@ KNL_WLALINKFLAGS ?= -b
 
 ## inputs
 
+KNL_CONVERT := $(KNL_DIR)knl-vgm-convert.c
+
 KNL_68K := $(KNL_DIR)knl-68k.asm
 KNL_Z80 := $(KNL_DIR)knl-z80.asm
 KNL_Z80_LN := $(KNL_DIR)knl-z80.ln
@@ -81,7 +83,7 @@ $(KNL_OUT_MODULE): $(KNL_OUT_CONVERT) $(KNL_VGMS)
 	$(KNL_OUT_CONVERT) $(KNL_OUT_MODULE) $(KNL_VGMS)
 
 
-%$(DOTEXE): %.c
+$(KNL_OUT_CONVERT): $(KNL_CONVERT)
 	$(KNL_CC) $(KNL_CFLAGS) $< -o $@ $(KNL_CLIBS)
 
 
