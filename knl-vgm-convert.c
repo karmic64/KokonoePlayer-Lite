@@ -763,7 +763,7 @@ int load_vgm(char * vgm_filename)
 				/*********************** everything else ********************/
 				else
 				{
-					/****** frequency (todo: combined low/high command) ******/
+					/****** frequency ******/
 					if (r >= 0xa0 && r < 0xa7)
 					{
 						uint16_t *freq = &state.fm.freq[chn];
