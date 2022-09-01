@@ -860,7 +860,8 @@ play:
 	ld a,d ;if any operator was newly keyed on, take control
 	cpl
 	and e
-	jp nz,@@vgm_data_read_loop
+	jp z,@@vgm_data_read_loop
+	ld (iy+ss_fm_keyon),a ;only key on the newly keyed-on operators
 	
 @@@@@takeover:
 	push bc
