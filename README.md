@@ -98,6 +98,30 @@ void knl_stop(unsigned song_slot);
 ```
 Stops playback of song slot `song_slot`.
 
+### knl_pause
+```c
+void knl_pause(unsigned song_slot);
+```
+Pauses playback of song slot `song_slot`.
+
+### knl_resume
+```c
+void knl_resume(unsigned song_slot);
+```
+Resumes playback of song slot `song_slot`, if it was paused.
+
+### knl_get_song
+```c
+int knl_get_song(unsigned song_slot);
+```
+Returns the song ID currently being played in song slot `song_slot`. If the song slot is unoccupied, a negative value is returned.
+
+### knl_get_loops
+```c
+unsigned knl_get_loops(unsigned song_slot);
+```
+Returns the amount of times the song currently being played in song slot `song_slot` has looped. This counter is reset to 0 when the song is initialized.
+
 ## Disclaimer
 
 All the VGMs in this repository are used for testing purposes only, and are taken unmodified from DefleMask and Furnace's demo song libraries. They are not mine.

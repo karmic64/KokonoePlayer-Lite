@@ -114,7 +114,7 @@ k_song_slots_loop dsb ss_size*KNL_SONG_SLOTS
 
 ;;;;;;;;;;;;;;;; 68k-z80 communication variables
 
-.define STACK_POINTER $1ef0
+.define STACK_POINTER $1ec0
 .enum STACK_POINTER
 comm_end_index db
 
@@ -122,6 +122,10 @@ comm_end_index db
 song_tbl_base dsb 3
 fm_patch_tbl_base dsb 3
 sample_tbl_base dsb 3
+
+;playback info
+song_id_tbl dsw KNL_SONG_SLOTS
+song_loops_tbl dsb KNL_SONG_SLOTS
 
 .ende
 
@@ -244,6 +248,13 @@ reset:
 	; ram has already been zeroed by the 68k, so only init nonzero ones
 	ld hl,k_fm_channel_ss
 	ld b,6
+-:
+	ld (hl),a
+	inc hl
+	djnz -
+	
+	ld hl,song_id_tbl
+	ld b,KNL_SONG_SLOTS*2
 -:
 	ld (hl),a
 	inc hl
@@ -376,7 +387,7 @@ main_loop:
 	ld c,a
 	ld a,(comm_end_index)
 	cp c
-	jr z,@after_comms
+	jp z,@after_comms
 	ld b,>comm_buf
 	
 @comm_loop:
@@ -395,6 +406,8 @@ main_loop:
 @@tbl:
 	.dw @@init
 	.dw @@stop
+	.dw @@pause
+	.dw @@resume
 	
 	;;;;;;;;;;;;;;;;;;; cmd $00 init song: byte - song slot, word - song id
 @@init:
@@ -402,10 +415,25 @@ main_loop:
 	inc c
 	call set_song_slot
 	
+	ld a,(k_song_slot)
+	ld e,a
+	ld d,0
+	ld hl,song_loops_tbl
+	add hl,de
+	ld (hl),0
+	
+	rlc e
+	ld hl,song_id_tbl
+	add hl,de
+	
 	ld a,(bc)
+	ld (hl),a
+	inc hl
 	ld e,a
 	inc c
 	ld a,(bc)
+	ld (hl),a
+	inc hl
 	ld d,a
 	inc c
 	push bc
@@ -449,12 +477,48 @@ main_loop:
 	call stop_song_slot
 	pop bc
 	jr @next_comm
+	
+	
+	
+	
+	;;;;;;;;;;;;;;;; cmd $04 pause song slot: byte - song slot
+@@pause:
+	ld a,(bc)
+	inc c
+	push bc
+	call set_song_slot
+	call pause_current_song_slot
+	pop bc
+	jr @next_comm
+	
+	
+	
+	
+	;;;;;;;;;;;;;;;; cmd $06 resume song slot: byte - song slot
+@@resume:
+	ld a,(bc)
+	inc c
+	push bc
+	call set_song_slot
+	
+	ld a,(ix+ss_ptr+1)
+	or a
+	jr z,+
+	set SS_FLAG_ON,(ix+ss_flags)
+	
++:
+	pop bc
+	jr @next_comm
+	
+	
 
 	
+	
+	;;;;;;;;;;;;;;;;;;; next command
 @next_comm:
 	ld a,(comm_end_index)
 	cp c
-	jr nz,@comm_loop
+	jp nz,@comm_loop
 	ld (k_comm_index),a
 	
 @after_comms:
@@ -762,6 +826,15 @@ play:
 	inc a
 	cp 6
 	jr c,@@@@@reset_loop
+	
+	
+	;signal loop
+	ld a,(k_song_slot)
+	ld e,a
+	ld d,0
+	ld hl,song_loops_tbl
+	add hl,de
+	inc (hl)
 	
 	
 	ld l,(ix+ss_ptr+0)
@@ -1337,7 +1410,22 @@ stop_song_slot:
 	call set_song_slot
 	
 stop_current_song_slot:
-	ld (ix+ss_flags),0
+	ld (ix+ss_ptr+1),0
+	
+	ld a,(k_song_slot)
+	rlca
+	ld e,a
+	ld d,0
+	ld hl,song_id_tbl
+	add hl,de
+	ld a,$ff
+	ld (hl),a
+	inc hl
+	ld (hl),a
+	
+	
+pause_current_song_slot:
+	res SS_FLAG_ON,(ix+ss_flags)
 	
 	
 give_up_channels:

@@ -4,8 +4,15 @@ Z80BUSREQ = $a11100
 Z80RESET = $a11200
 
 
-z80_comm_index = Z80+$1ef0
-z80_base_pointers = Z80+$1ef1
+
+	offset Z80+$1ec0
+z80_comm_index ds.b 1
+z80_base_pointers ds.l 3
+
+z80_song_id_tbl ds.w KNL_SONG_SLOTS
+z80_song_loops_tbl ds.b KNL_SONG_SLOTS
+
+
 
 z80_comm_buf = Z80+$1f00
 
@@ -13,7 +20,7 @@ z80_comm_buf = Z80+$1f00
 
 	section .text,code
 	
-	db "KokonoePlayer-Lite v0.90 coded by karmic"
+	db "KokonoePlayer-Lite v0.95 coded by karmic"
 	align 1
 	
 	
@@ -93,15 +100,21 @@ z80_pointer_table_end:
 	
 	
 	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-	;; 68k -> z80 functions
+	;; 68k <-> z80 function helpers
 	
-z80_enter:
+	
+z80_read_enter:
 	lea Z80BUSREQ,a0
 	move.w #$0100,d0
 	move.w d0,(a0)
 .waitloop
 	cmp.w (a0),d0
 	beq .waitloop
+	rts
+	
+	
+z80_enter:
+	bsr z80_read_enter
 	
 	lea z80_comm_buf,a1
 	moveq #0,d1
@@ -113,6 +126,7 @@ z80_enter:
 z80_exit:
 	move.b d1,z80_comm_index
 	
+z80_read_exit:
 	clr.w Z80BUSREQ
 	rts
 	
@@ -121,6 +135,14 @@ z80_exit:
 		move.b \1,(a1,d1)
 		addq.b #1,d1
 	endm
+	
+	
+	
+	
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; 68k -> z80 functions
+	
 	
 	
 	
@@ -158,6 +180,89 @@ knl_stop::
 	
 	
 	
+knl_pause::
+	cargs #4, .arg_song_slot.l
+	bsr z80_enter
+	
+	z80_comm #2 * 2
+	
+	z80_comm .arg_song_slot+3(sp)
+	
+	bra z80_exit
+	
+	
+	
+	
+	
+knl_resume::
+	cargs #4, .arg_song_slot.l
+	bsr z80_enter
+	
+	z80_comm #3 * 2
+	
+	z80_comm .arg_song_slot+3(sp)
+	
+	bra z80_exit
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; 68k <- z80 functions
+	
+knl_get_song::
+	cargs #4, .arg_song_slot.l
+	bsr z80_read_enter
+	
+	
+	move.l .arg_song_slot(sp),d1
+	add.l d1,d1
+	lea z80_song_id_tbl,a0
+	
+	moveq #0,d0
+	move.b (a0,d1),d0
+	move.b 1(a0,d1),d1
+	lsl.w #8,d1
+	or.w d1,d0
+	ext.l d0
+	
+	
+	bra z80_read_exit
+	
+	
+	
+	
+knl_get_loops::
+	cargs #4, .arg_song_slot.l
+	bsr z80_read_enter
+	
+	
+	move.l .arg_song_slot(sp),d0
+	lea z80_song_loops_tbl,a0
+	moveq #0,d0
+	move.b (a0,d0),d0
+	
+	
+	bra z80_read_exit
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 	
 	
 	section .rodata,data

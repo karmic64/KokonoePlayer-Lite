@@ -7,5 +7,10 @@
 void knl_reset();
 void knl_init(unsigned,unsigned);
 void knl_stop(unsigned);
+void knl_pause(unsigned);
+void knl_resume(unsigned);
 
-#endif KOKONOEPLAYERLITE_H
+int knl_get_song(unsigned);
+unsigned knl_get_loops(unsigned);
+
+#endif
