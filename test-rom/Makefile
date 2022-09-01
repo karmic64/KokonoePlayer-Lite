@@ -12,10 +12,10 @@ KNL_VGMS := ../test-vgms/*.vgm
 include $(KNL_DIR)Makefile
 
 
-LD := m68k-linux-gnu-ld
+M68K_LD := m68k-linux-gnu-ld
 
 test-rom.elf: test-rom.asm font.rom exceptions.asm
 	$(KNL_VASM) -Felf $(KNL_VASMFLAGS) -o $@ $<
 
 test-rom.gen: link.ld test-rom.elf $(KNL_OUT)
-	$(LD) -M -T link.ld --oformat binary -o $@ test-rom.elf $(KNL_OUT)
+	$(M68K_LD) -M -T link.ld --oformat binary -o $@ test-rom.elf $(KNL_OUT)
