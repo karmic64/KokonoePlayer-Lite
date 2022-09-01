@@ -16,7 +16,7 @@ To use KokonoePlayer-Lite, you need the following:
 
 This section assumes you are using `make` to build your project.
 
-First off, add the following to the top of your `Makefile`:
+First off, add the following to your `Makefile`:
 ```make
 KNL_DIR := ...
 KNL_SONG_SLOTS := ...
