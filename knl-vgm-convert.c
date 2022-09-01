@@ -1024,7 +1024,7 @@ int main(int argc, char *argv[])
 	{
 		load_vgm(argv[i]);
 		putchar('\n');
-		for (int i = 0; i < 79; i++) putchar('-');
+		for (int i = 0; i < 78; i++) putchar('-');
 		putchar('\n');
 	}
 	
@@ -1102,28 +1102,33 @@ int main(int argc, char *argv[])
 	
 	/************** fm patches ****************/
 	/***** pointers *****/
-	fprintf(f,"\n\n; FM patches.\n align 1\nknl_fm_patch_tbl: dl ");
-	for (size_t i = 0; i < fm_patches; i++)
+	fprintf(f,"\n\n; FM patches.\n align 1\nknl_fm_patch_tbl:");
+	if (fm_patches)
 	{
-		fprintf(f,"knl_fm_patch_%lu",i);
-		if (i < fm_patches-1) fputc(',',f);
-	}
-	
-	/***** actual data *****/
-	for (size_t i = 0; i < fm_patches; i++)
-	{
-		fm_patch_t *p = &fm_patch_tbl[i];
-		fprintf(f,"\nknl_fm_patch_%lu: db ",i);
+		fprintf(f," dl ");
 		
-		fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg30[0],p->reg30[1],p->reg30[2],p->reg30[3]);
-		fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg40[0],p->reg40[1],p->reg40[2],p->reg40[3]);
-		fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg50[0],p->reg50[1],p->reg50[2],p->reg50[3]);
-		fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg60[0],p->reg60[1],p->reg60[2],p->reg60[3]);
-		fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg70[0],p->reg70[1],p->reg70[2],p->reg70[3]);
-		fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg80[0],p->reg80[1],p->reg80[2],p->reg80[3]);
-		fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg90[0],p->reg90[1],p->reg90[2],p->reg90[3]);
+		for (size_t i = 0; i < fm_patches; i++)
+		{
+			fprintf(f,"knl_fm_patch_%lu",i);
+			if (i < fm_patches-1) fputc(',',f);
+		}
 		
-		fprintf(f,"$%02X, $%02X", p->regb0,p->regb4);
+		/***** actual data *****/
+		for (size_t i = 0; i < fm_patches; i++)
+		{
+			fm_patch_t *p = &fm_patch_tbl[i];
+			fprintf(f,"\nknl_fm_patch_%lu: db ",i);
+			
+			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg30[0],p->reg30[1],p->reg30[2],p->reg30[3]);
+			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg40[0],p->reg40[1],p->reg40[2],p->reg40[3]);
+			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg50[0],p->reg50[1],p->reg50[2],p->reg50[3]);
+			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg60[0],p->reg60[1],p->reg60[2],p->reg60[3]);
+			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg70[0],p->reg70[1],p->reg70[2],p->reg70[3]);
+			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg80[0],p->reg80[1],p->reg80[2],p->reg80[3]);
+			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg90[0],p->reg90[1],p->reg90[2],p->reg90[3]);
+			
+			fprintf(f,"$%02X, $%02X", p->regb0,p->regb4);
+		}
 	}
 	
 	
@@ -1131,32 +1136,37 @@ int main(int argc, char *argv[])
 	
 	/************** samples ****************/
 	/***** pointers *****/
-	fprintf(f,"\n\n; Samples.\n align 1\nknl_sample_tbl: dl ");
-	for (size_t i = 0; i < samples; i++)
+	fprintf(f,"\n\n; Samples.\n align 1\nknl_sample_tbl:");
+	if (samples)
 	{
-		fprintf(f,"knl_sample_%lu",i);
-		if (i < samples-1) fputc(',',f);
-	}
-	
-	/***** actual datas *****/
-	for (size_t i = 0; i < samples; i++)
-	{
-		sample_t *s = &sample_tbl[i];
-		fprintf(f,"\nknl_sample_%lu: db ",i);
+		fprintf(f," dl ");
 		
-		for (size_t j = 0; j < s->size; j++)
+		for (size_t i = 0; i < samples; i++)
 		{
-			unsigned data = s->data[j];
-			if (!data) data = 1; /* we use 0 for end marker */
-			fprintf(f,"$%02X,",data);
+			fprintf(f,"knl_sample_%lu",i);
+			if (i < samples-1) fputc(',',f);
 		}
 		
-		/* end marker */
-		fputc(' ',f);
-		for (int j = 0; j < 0x100; j++)
+		/***** actual datas *****/
+		for (size_t i = 0; i < samples; i++)
 		{
-			fputc('0',f);
-			if (j < 0xff) fputc(',',f);
+			sample_t *s = &sample_tbl[i];
+			fprintf(f,"\nknl_sample_%lu: db ",i);
+			
+			for (size_t j = 0; j < s->size; j++)
+			{
+				unsigned data = s->data[j];
+				if (!data) data = 1; /* we use 0 for end marker */
+				fprintf(f,"$%02X,",data);
+			}
+			
+			/* end marker */
+			fputc(' ',f);
+			for (int j = 0; j < 0x100; j++)
+			{
+				fputc('0',f);
+				if (j < 0xff) fputc(',',f);
+			}
 		}
 	}
 	
