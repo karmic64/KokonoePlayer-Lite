@@ -7,7 +7,7 @@ Z80RESET = $a11200
 
 	offset Z80+$1ec0
 z80_comm_index ds.b 1
-z80_base_pointers ds.l 3
+z80_base_pointers ds.b 3*3
 
 z80_song_id_tbl ds.w KNL_SONG_SLOTS
 z80_song_loops_tbl ds.b KNL_SONG_SLOTS
