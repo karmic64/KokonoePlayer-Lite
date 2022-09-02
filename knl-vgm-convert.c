@@ -362,8 +362,20 @@ int load_vgm(char * vgm_filename)
 	/*********************** read the vgm datastream ***************************/
 	uint8_t *vp = vgm+vgm_data_offset;
 	uint8_t *vlp = vgm_loop_offset ? vgm+vgm_loop_offset : NULL;
-	song.data = malloc(vgm_size);
-	uint8_t *sp = song.data;
+	uint8_t *ve = vgm+vgm_size;
+	song.data = NULL;
+	song.size = 0;
+	size_t song_max = 0;
+	void wr(unsigned data)
+	{
+		if (song.size == song_max)
+		{
+			if (!song_max) song_max = 0x20000;
+			else song_max *= 2;
+			song.data = realloc(song.data,song_max);
+		}
+		song.data[song.size++] = data;
+	}
 	
 	/*************** playback state functions **************/
 	playback_state_t state;
@@ -383,9 +395,9 @@ int load_vgm(char * vgm_filename)
 			unsigned new_id = add_fm_patch(new);
 			memcpy(old, new, sizeof(*new));
 			
-			*sp++ = 3 + (chn << 4) + (new_id < 0x100 ? 0 : 1);
-			*sp++ = new_id & 0xff;
-			if (new_id >= 0x100) *sp++ = new_id >> 8;
+			wr(3 + (chn << 4) + (new_id < 0x100 ? 0 : 1));
+			wr(new_id & 0xff);
+			if (new_id >= 0x100) wr(new_id >> 8);
 		}
 	}
 	
@@ -403,19 +415,19 @@ int load_vgm(char * vgm_filename)
 			
 			if (lodiff && hidiff)
 			{
-				*sp++ = (chn<<4) + 7;
-				*sp++ = (*new)&0xff;
-				*sp++ = (*new)>>8;
+				wr((chn<<4) + 7);
+				wr((*new)&0xff);
+				wr((*new)>>8);
 			}
 			else if (lodiff)
 			{
-				*sp++ = (chn<<4) + 5;
-				*sp++ = (*new)&0xff;
+				wr((chn<<4) + 5);
+				wr((*new)&0xff);
 			}
 			else if (hidiff)
 			{
-				*sp++ = (chn<<4) + 6;
-				*sp++ = (*new)>>8;
+				wr((chn<<4) + 6);
+				wr((*new)>>8);
 			}
 			
 			*old = *new;
@@ -432,19 +444,19 @@ int load_vgm(char * vgm_filename)
 			
 			if (lodiff && hidiff)
 			{
-				*sp++ = (op<<4) + 0xa;
-				*sp++ = (*new)&0xff;
-				*sp++ = (*new)>>8;
+				wr((op<<4) + 0xa);
+				wr((*new)&0xff);
+				wr((*new)>>8);
 			}
 			else if (lodiff)
 			{
-				*sp++ = (op<<4) + 0x8;
-				*sp++ = (*new)&0xff;
+				wr((op<<4) + 0x8);
+				wr((*new)&0xff);
 			}
 			else if (hidiff)
 			{
-				*sp++ = (op<<4) + 0x9;
-				*sp++ = (*new)>>8;
+				wr((op<<4) + 0x9);
+				wr((*new)>>8);
 			}
 			
 			*old = *new;
@@ -466,13 +478,13 @@ int load_vgm(char * vgm_filename)
 			{
 				*old = *new;
 				if (*new == 0x00)
-					*sp++ = (chn<<4) + 0;
+					wr((chn<<4) + 0);
 				else if (*new == 0xf0)
-					*sp++ = (chn<<4) + 1;
+					wr((chn<<4) + 1);
 				else
 				{
-					*sp++ = (chn<<4) + 2;
-					*sp++ = *new;
+					wr((chn<<4) + 2);
+					wr(*new);
 				}
 			}
 		}
@@ -487,22 +499,22 @@ int load_vgm(char * vgm_filename)
 		{
 			prv.fm.chn3_mode = state.fm.chn3_mode;
 			
-			*sp++ = 0x60 + (state.fm.chn3_mode ? 1 : 0);
+			wr(0x60 + (state.fm.chn3_mode ? 1 : 0));
 		}
 		
 		if (prv.fm.dac_enable != state.fm.dac_enable)
 		{
 			prv.fm.dac_enable = state.fm.dac_enable;
 			
-			*sp++ = 0x62 + (state.fm.dac_enable ? 1 : 0);
+			wr(0x62 + (state.fm.dac_enable ? 1 : 0));
 		}
 		
 		if (prv.fm.lfo != state.fm.lfo)
 		{
 			prv.fm.lfo = state.fm.lfo;
 			
-			*sp++ = 0x64;
-			*sp++ = state.fm.lfo;
+			wr(0x64);
+			wr(state.fm.lfo);
 		}
 	}
 	
@@ -517,7 +529,7 @@ int load_vgm(char * vgm_filename)
 			if (*v != *pv)
 			{
 				*pv = *v;
-				*sp++ = 0x80 + (chn<<4) + *v;
+				wr(0x80 + (chn<<4) + *v);
 			}
 			
 			/* freq */
@@ -531,24 +543,24 @@ int load_vgm(char * vgm_filename)
 			{
 				if (*pf == (uint16_t)-1 || fl != pfl)
 				{ 
-					*sp++ = 0x6c + chn;
-					*sp++ = fl;
+					wr(0x6c + chn);
+					wr(fl);
 				}
 				if (*pf == (uint16_t)-1 || fh != pfh)
 				{
-					*sp++ = 0x70 + (chn<<2) + fh;
+					wr(0x70 + (chn<<2) + fh);
 				}
 			}
 			else
 			{
 				if (((*pf)&4) != ((*f)&4))
 				{ /* noise mode change */
-					*sp++ = 0x6f;
-					*sp++ = fl;
+					wr(0x6f);
+					wr(fl);
 				}
 				else if (((*pf)&3) != ((*f)&3))
 				{ /* only noise pitch change */
-					*sp++ = 0x70 + (chn<<2) + (fl&3);
+					wr(0x70 + (chn<<2) + (fl&3));
 				}
 			}
 			*pf = *f;
@@ -565,9 +577,9 @@ int load_vgm(char * vgm_filename)
 		{
 			prv.sample_freq = state.sample_freq;
 			
-			*sp++ = 0x65;
-			*sp++ = (state.sample_freq&0xff);
-			*sp++ = (state.sample_freq>>8);
+			wr(0x65);
+			wr(state.sample_freq&0xff);
+			wr(state.sample_freq>>8);
 		}
 	}
 	
@@ -598,7 +610,7 @@ int load_vgm(char * vgm_filename)
 		if (c == 0x66)
 		{ /* end */
 			flush_playback_state();
-			*sp++ = 0x6b;
+			wr(0x6b);
 			break;
 		}
 		/********************* DATA BLOCKS *******************/
@@ -661,7 +673,7 @@ int load_vgm(char * vgm_filename)
 			unsigned sid = *vp++;
 			if (sid == active_stream_id)
 			{
-				*sp++ = 0x68;
+				wr(0x68);
 			}
 		}
 		else if (c == 0x95)
@@ -698,7 +710,7 @@ int load_vgm(char * vgm_filename)
 				
 				if (!new.size)
 				{ /* we cropped everything (or the sample is just empty), just stop */
-					*sp++ = 0x68;
+					wr(0x68);
 				}
 				else
 				{
@@ -714,8 +726,8 @@ int load_vgm(char * vgm_filename)
 					}
 					
 					/* command */
-					*sp++ = 0x66 + ((flags & 1) ? 1 : 0);
-					*sp++ = new_id;
+					wr(0x66 + ((flags & 1) ? 1 : 0));
+					wr(new_id);
 				}
 			}
 		}
@@ -903,7 +915,7 @@ int load_vgm(char * vgm_filename)
 				while (ntsc_frames > 0)
 				{
 					unsigned i = min(ntsc_frames,0x20);
-					*sp++ = 0xc0 + (i - 1);
+					wr(0xc0 + (i - 1));
 					ntsc_frames -= i;
 				}
 			}
@@ -911,8 +923,8 @@ int load_vgm(char * vgm_filename)
 			{
 				while (pal_frames > 0)
 				{
-					unsigned i = min(ntsc_frames,0x20);
-					*sp++ = 0xe0 + (i - 1);
+					unsigned i = min(pal_frames,0x20);
+					wr(0xe0 + (i - 1));
 					pal_frames -= i;
 				}
 			}
@@ -921,9 +933,9 @@ int load_vgm(char * vgm_filename)
 				while (current_wait > 0)
 				{
 					unsigned i = min(current_wait,0xffff);
-					*sp++ = 0x69;
-					*sp++ = i & 0xff;
-					*sp++ = i >> 8;
+					wr(0x69);
+					wr(i & 0xff);
+					wr(i >> 8);
 					current_wait -= i;
 				}
 			}
@@ -958,9 +970,22 @@ int load_vgm(char * vgm_filename)
 			else if (vp == vlp)
 			{
 				flush_playback_state();
-				*sp++ = 0x6a;
+				wr(0x6a);
 				loop_hit = 1;
 			}
+		}
+		
+		/******************* peculiar behavior failsafes ****************/
+		if (song.size > 0x100000)
+		{
+			puts("Passed 0x100000 output bytes. This either indicates a bug in this program or an extremely large VGM file.");
+			goto load_vgm_fail;
+		}
+		
+		if (vp > ve)
+		{
+			puts("Passed VGM end-of-file. This either indicates a bug in this program or a malformed VGM file.");
+			goto load_vgm_fail;
 		}
 	}
 	
@@ -974,7 +999,6 @@ int load_vgm(char * vgm_filename)
 	puts("Success.");
 	return_val = 0;
 	
-	song.size = sp - song.data;
 	songs_size += song.size;
 	add_song(&song);
 	
@@ -1024,7 +1048,7 @@ int main(int argc, char *argv[])
 	{
 		load_vgm(argv[i]);
 		putchar('\n');
-		for (int i = 0; i < 78; i++) putchar('-');
+		for (int i = 0; i < 75; i++) putchar('-');
 		putchar('\n');
 	}
 	
