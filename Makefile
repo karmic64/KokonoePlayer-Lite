@@ -70,6 +70,7 @@ KNL_OUT := $(KNL_OUT_68K)
 knl-default:
 	@echo "Please don't run make directly on this Makefile."
 	@echo "Refer to the documentation for how to properly integrate it into your project."
+	@echo "Make sure you have defined a default target BEFORE you include this Makefile!"
 	@exit 1
 
 knl-clean:

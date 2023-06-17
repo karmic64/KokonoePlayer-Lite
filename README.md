@@ -24,6 +24,8 @@ KNL_VGMS := ...
 
 include $(KNL_DIR)Makefile
 ```
+Make sure you have defined a default target before including the KokonoePlayer-Lite Makefile, otherwise `make` will try looking in there for it and not in your own Makefile. The include should be placed near the top of your Makefile, after the default rule, but high enough so all of your other rules can access the KokonoePlayer-Lite variables. The KokonoePlayer-Lite Makefile has its own default rule that will warn you if you have not defined a default rule yet.
+
 Replace the `KNL_DIR` value with the path to the root of the KokonoePlayer-Lite sources, **with** a trailing slash. Replace the `KNL_SONG_SLOTS` value with the amount of song slots you wish to use. Replace the `KNL_VGMS` value with the path of every VGM file you wish to use.
 
 If you are using C, find any rule that compiles individual source files into output files. Add the option `-I $(KNL_DIR)`, allowing the compiler to locate the `knl.h` header file.
