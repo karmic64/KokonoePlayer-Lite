@@ -107,6 +107,7 @@ SetVDPRegsA macro
 	
 	
 	section .header
+	org 0
 	
 	dl $ffff8000
 	dl reset

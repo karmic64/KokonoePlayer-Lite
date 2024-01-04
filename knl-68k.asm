@@ -9,9 +9,6 @@ Z80RESET = $a11200
 z80_comm_index ds.b 1
 z80_base_pointers ds.b 3*3
 
-z80_song_id_tbl ds.w KNL_SONG_SLOTS
-z80_song_loops_tbl ds.b KNL_SONG_SLOTS
-
 
 
 z80_comm_buf = Z80+$1f00
@@ -216,41 +213,6 @@ knl_resume::
 	
 	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 	;; 68k <- z80 functions
-	
-knl_get_song::
-	cargs #4, .arg_song_slot.l
-	bsr z80_read_enter
-	
-	
-	move.l .arg_song_slot(sp),d1
-	add.l d1,d1
-	lea z80_song_id_tbl,a0
-	
-	moveq #0,d0
-	move.b (a0,d1),d0
-	move.b 1(a0,d1),d1
-	lsl.w #8,d1
-	or.w d1,d0
-	ext.l d0
-	
-	
-	bra z80_read_exit
-	
-	
-	
-	
-knl_get_loops::
-	cargs #4, .arg_song_slot.l
-	bsr z80_read_enter
-	
-	
-	move.l .arg_song_slot(sp),d0
-	lea z80_song_loops_tbl,a0
-	moveq #0,d0
-	move.b (a0,d0),d0
-	
-	
-	bra z80_read_exit
 	
 	
 	

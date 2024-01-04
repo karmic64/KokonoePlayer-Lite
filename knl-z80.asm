@@ -123,10 +123,6 @@ song_tbl_base dsb 3
 fm_patch_tbl_base dsb 3
 sample_tbl_base dsb 3
 
-;playback info
-song_id_tbl dsw KNL_SONG_SLOTS
-song_loops_tbl dsb KNL_SONG_SLOTS
-
 .ende
 
 .define comm_buf $1f00
@@ -248,13 +244,6 @@ reset:
 	; ram has already been zeroed by the 68k, so only init nonzero ones
 	ld hl,k_fm_channel_ss
 	ld b,6
--:
-	ld (hl),a
-	inc hl
-	djnz -
-	
-	ld hl,song_id_tbl
-	ld b,KNL_SONG_SLOTS*2
 -:
 	ld (hl),a
 	inc hl
@@ -415,25 +404,10 @@ main_loop:
 	inc c
 	call set_song_slot
 	
-	ld a,(k_song_slot)
-	ld e,a
-	ld d,0
-	ld hl,song_loops_tbl
-	add hl,de
-	ld (hl),0
-	
-	rlc e
-	ld hl,song_id_tbl
-	add hl,de
-	
 	ld a,(bc)
-	ld (hl),a
-	inc hl
 	ld e,a
 	inc c
 	ld a,(bc)
-	ld (hl),a
-	inc hl
 	ld d,a
 	inc c
 	push bc
@@ -826,15 +800,6 @@ play:
 	inc a
 	cp 6
 	jr c,@@@@@reset_loop
-	
-	
-	;signal loop
-	ld a,(k_song_slot)
-	ld e,a
-	ld d,0
-	ld hl,song_loops_tbl
-	add hl,de
-	inc (hl)
 	
 	
 	ld l,(ix+ss_ptr+0)
@@ -1411,17 +1376,6 @@ stop_song_slot:
 	
 stop_current_song_slot:
 	ld (ix+ss_ptr+1),0
-	
-	ld a,(k_song_slot)
-	rlca
-	ld e,a
-	ld d,0
-	ld hl,song_id_tbl
-	add hl,de
-	ld a,$ff
-	ld (hl),a
-	inc hl
-	ld (hl),a
 	
 	
 pause_current_song_slot:
