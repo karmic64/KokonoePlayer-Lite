@@ -338,7 +338,7 @@ int load_vgm(char * vgm_filename)
 	unsigned vgm_reported_size = get32(vgm+4)+4;
 	if (vgm_reported_size != vgm_size)
 	{
-		printf("bad vgm size (%lu bytes, should be %u)", vgm_size, vgm_reported_size);
+		printf("bad vgm size (%zu bytes, should be %u)", vgm_size, vgm_reported_size);
 		goto load_vgm_fail;
 	}
 	unsigned vgm_version = get32(vgm+8);
@@ -1054,7 +1054,7 @@ int main(int argc, char *argv[])
 	
 	
 	/********* report ********************/
-	printf("\n%lu songs, %lu FM patches, %lu samples.\n",songs,fm_patches,samples);
+	printf("\n%zu songs, %zu FM patches, %zu samples.\n",songs,fm_patches,samples);
 	if (!songs)
 	{
 		puts("No valid songs, quitting.");
@@ -1063,9 +1063,9 @@ int main(int argc, char *argv[])
 	
 	size_t fm_patches_size = fm_patches*(7*4 + 2);
 	size_t total_size = songs_size+fm_patches_size+samples_size;
-	printf("Song data: %lu bytes, FM patches: %lu bytes, samples: %lu bytes.\n"
+	printf("Song data: %zu bytes, FM patches: %zu bytes, samples: %zu bytes.\n"
 		,songs_size,fm_patches_size,samples_size);
-	printf("Total size: %lu bytes (%.1f KiB).\n", total_size,total_size/1024.0);
+	printf("Total size: %zu bytes (%.1f KiB).\n", total_size,total_size/1024.0);
 	
 	int toomany = 0;
 	if (songs > MAX_SONGS)
@@ -1105,7 +1105,7 @@ int main(int argc, char *argv[])
 	fprintf(f,"\n\n; Song data streams.\n align 1\nknl_song_tbl: dl ");
 	for (size_t i = 0; i < songs; i++)
 	{
-		fprintf(f,"knl_song_%lu",i);
+		fprintf(f,"knl_song_%zu",i);
 		if (i < songs-1) fputc(',',f);
 	}
 	
@@ -1113,7 +1113,7 @@ int main(int argc, char *argv[])
 	for (size_t i = 0; i < songs; i++)
 	{
 		song_t *s = &song_tbl[i];
-		fprintf(f,"\nknl_song_%lu: db ",i);
+		fprintf(f,"\nknl_song_%zu: db ",i);
 		
 		for (size_t j = 0; j < s->size; j++)
 		{
@@ -1133,7 +1133,7 @@ int main(int argc, char *argv[])
 		
 		for (size_t i = 0; i < fm_patches; i++)
 		{
-			fprintf(f,"knl_fm_patch_%lu",i);
+			fprintf(f,"knl_fm_patch_%zu",i);
 			if (i < fm_patches-1) fputc(',',f);
 		}
 		
@@ -1141,7 +1141,7 @@ int main(int argc, char *argv[])
 		for (size_t i = 0; i < fm_patches; i++)
 		{
 			fm_patch_t *p = &fm_patch_tbl[i];
-			fprintf(f,"\nknl_fm_patch_%lu: db ",i);
+			fprintf(f,"\nknl_fm_patch_%zu: db ",i);
 			
 			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg30[0],p->reg30[1],p->reg30[2],p->reg30[3]);
 			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg40[0],p->reg40[1],p->reg40[2],p->reg40[3]);
@@ -1167,7 +1167,7 @@ int main(int argc, char *argv[])
 		
 		for (size_t i = 0; i < samples; i++)
 		{
-			fprintf(f,"knl_sample_%lu",i);
+			fprintf(f,"knl_sample_%zu",i);
 			if (i < samples-1) fputc(',',f);
 		}
 		
@@ -1175,7 +1175,7 @@ int main(int argc, char *argv[])
 		for (size_t i = 0; i < samples; i++)
 		{
 			sample_t *s = &sample_tbl[i];
-			fprintf(f,"\nknl_sample_%lu: db ",i);
+			fprintf(f,"\nknl_sample_%zu: db ",i);
 			
 			for (size_t j = 0; j < s->size; j++)
 			{
