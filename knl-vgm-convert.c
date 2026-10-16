@@ -53,6 +53,29 @@ FM COMMANDS:
 
 */
 
+const unsigned char command_size_tbl[0x100] = {
+	// 00-5f fm control
+	1,1,2,2,3,2,2,3,2,2,3,0,0,0,0,0,
+	1,1,2,2,3,2,2,3,2,2,3,0,0,0,0,0,
+	1,1,2,2,3,2,2,3,2,2,3,0,0,0,0,0,
+	1,1,2,2,3,2,2,3,0,0,0,0,0,0,0,0,
+	1,1,2,2,3,2,2,3,0,0,0,0,0,0,0,0,
+	1,1,2,2,3,2,2,3,0,0,0,0,0,0,0,0,
+	// 60-6f control and psg low-freq
+	1,1,1,1,2,3,2,2,1,3,1,1,2,2,2,2,
+	// 70-bf psg main
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	// c0-ff short waits
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+};
+
 
 
 #define min(a,b) (((a) < (b)) ? (a) : (b))
@@ -85,6 +108,8 @@ unsigned get32(uint8_t *p) { return (*(p+0)) | (*(p+1)<<8) | (*(p+2)<<16) | (*(p
 
 /*************** structs ****************/
 
+/////// fm patch
+
 typedef struct {
 	uint8_t reg30[4];
 	uint8_t reg40[4];
@@ -116,6 +141,11 @@ int fm_patch_cmp(fm_patch_t *a, fm_patch_t *b)
 	return 0;
 }
 
+unsigned add_fm_patch(fm_patch_t *);	// forward-declare add function
+
+
+////////////// sample
+
 typedef struct {
 	uint8_t * data;
 	size_t size;
@@ -131,17 +161,44 @@ int sample_cmp(sample_t *a, sample_t *b)
 	return memcmp(a->data, b->data, a->size);
 }
 
+unsigned add_sample(sample_t *);	// forward-declare add function
+
+
+
+/////////// song
+
+typedef struct {	// this struct should always be memset before use to allow safe memcmp'ing
+	unsigned char cmd;
+	unsigned param;
+} song_command_t;
 typedef struct {
-	uint8_t * data;
-	size_t size;
+	song_command_t * data;
+	size_t length;
+	size_t max;	// current allocated length of data array
 } song_t;
 int song_cmp(song_t *a, song_t *b)
 {
-	if (a->size != b->size) return 1;
-	return memcmp(a->data, b->data, a->size);
+	if (a->length != b->length) return 1;
+	return memcmp(a->data, b->data, a->length * sizeof(song_command_t));
+}
+void write_song_command(song_t * song, unsigned cmd, unsigned param) {
+	if (song->length == song->max) {
+		size_t old_song_max = song->max;
+		if (!song->max) song->max = 0x20000;
+		else song->max *= 2;
+		song->data = realloc(song->data,song->max*sizeof(*song->data));
+		memset(&song->data[old_song_max], 0, (song->max-old_song_max)*sizeof(*song->data));
+	}
+	song_command_t * sc = &song->data[song->length++];
+	sc->cmd = cmd;
+	sc->param = param;
 }
 
+unsigned add_song(song_t *);	// forward-declare add function
 
+
+
+/////// playback state
 
 typedef struct {
 	fm_patch_t patch[6];
@@ -171,6 +228,194 @@ void init_playback_state(playback_state_t *p)
 }
 
 
+/* flushes fm patches if any of them changed */
+void flush_fm_patches(song_t * song, playback_state_t * prv, playback_state_t * state)
+{
+	for (int chn = 0; chn < 6; chn++)
+	{
+		fm_patch_t *old = &prv->fm.patch[chn];
+		fm_patch_t *new = &state->fm.patch[chn];
+		if (!fm_patch_cmp(old,new)) continue;
+
+		unsigned new_id = add_fm_patch(new);
+		memcpy(old, new, sizeof(*new));
+
+		write_song_command(song, 3 + (chn << 4) + (new_id < 0x100 ? 0 : 1), new_id);
+	}
+}
+
+/* flushes fm freqs if any of them changed */
+void flush_fm_freqs(song_t * song, playback_state_t * prv, playback_state_t * state)
+{
+	/******** normal fm channels *********/
+	for (int chn = 0; chn < 6; chn++)
+	{
+		uint16_t *old = &prv->fm.freq[chn];
+		uint16_t *new = &state->fm.freq[chn];
+
+		int lodiff = ((*old)&0xff) != ((*new)&0xff);
+		int hidiff = ((*old)>>8) != ((*new)>>8);
+
+		if (lodiff && hidiff)
+		{
+			write_song_command(song, (chn<<4) + 7, *new);
+		}
+		else if (lodiff)
+		{
+			write_song_command(song, (chn<<4) + 5, (*new)&0xff);
+		}
+		else if (hidiff)
+		{
+			write_song_command(song, (chn<<4) + 6, (*new)>>8);
+		}
+
+		*old = *new;
+	}
+
+	/********* ext.chn3 frequencies *************/
+	for (int op = 0; op < 3; op++)
+	{
+		uint16_t *old = &prv->fm.extd_freq[op];
+		uint16_t *new = &state->fm.extd_freq[op];
+
+		int lodiff = ((*old)&0xff) != ((*new)&0xff);
+		int hidiff = ((*old)>>8) != ((*new)>>8);
+
+		if (lodiff && hidiff)
+		{
+			write_song_command(song, (op<<4) + 10, *new);
+		}
+		else if (lodiff)
+		{
+			write_song_command(song, (op<<4) + 8, (*new)&0xff);
+		}
+		else if (hidiff)
+		{
+			write_song_command(song, (op<<4) + 9, (*new)>>8);
+		}
+
+		*old = *new;
+	}
+}
+
+/* flushes FM patches, freqs, and keyon state */
+void flush_fm_keyon_state(song_t * song, playback_state_t * prv, playback_state_t * state)
+{
+	flush_fm_patches(song, prv, state);
+	flush_fm_freqs(song, prv, state);
+
+	for (int chn = 0; chn < 6; chn++)
+	{
+		uint8_t *old = &prv->fm.keyon[chn];
+		uint8_t *new = &state->fm.keyon[chn];
+
+		if (*old != *new)
+		{
+			*old = *new;
+			if (*new == 0x00)
+				write_song_command(song, (chn<<4) + 0, 0);
+			else if (*new == 0xf0)
+				write_song_command(song, (chn<<4) + 1, 0);
+			else
+			{
+				write_song_command(song, (chn<<4) + 2, *new);
+			}
+		}
+	}
+}
+
+/* fully flush fm state */
+void flush_fm_state(song_t * song, playback_state_t * prv, playback_state_t * state)
+{
+	flush_fm_keyon_state(song, prv, state);
+
+	if (prv->fm.chn3_mode != state->fm.chn3_mode)
+	{
+		prv->fm.chn3_mode = state->fm.chn3_mode;
+
+		write_song_command(song, 0x60 + (state->fm.chn3_mode ? 1 : 0), 0);
+	}
+
+	if (prv->fm.dac_enable != state->fm.dac_enable)
+	{
+		prv->fm.dac_enable = state->fm.dac_enable;
+
+		write_song_command(song, 0x62 + (state->fm.dac_enable ? 1 : 0), 0);
+	}
+
+	if (prv->fm.lfo != state->fm.lfo)
+	{
+		prv->fm.lfo = state->fm.lfo;
+
+		write_song_command(song, 0x64, state->fm.lfo);
+	}
+}
+
+/* fully flush psg state */
+void flush_psg_state(song_t * song, playback_state_t * prv, playback_state_t * state)
+{
+	for (int chn = 0; chn < 4; chn++)
+	{
+		/* volume */
+		uint8_t *v = &state->psg.volume[chn];
+		uint8_t *pv = &prv->psg.volume[chn];
+		if (*v != *pv)
+		{
+			*pv = *v;
+			write_song_command(song, 0x80 + (chn<<4) + *v, 0);
+		}
+
+		/* freq */
+		uint16_t *f = &state->psg.freq[chn];
+		uint8_t fl = (*f) & 0xff;
+		uint8_t fh = (*f) >> 8;
+		uint16_t *pf = &prv->psg.freq[chn];
+		uint8_t pfl = (*pf) & 0xff;
+		uint8_t pfh = (*pf) >> 8;
+		if (chn != 3)
+		{
+			if (*pf == (uint16_t)-1 || fl != pfl)
+			{
+				write_song_command(song, 0x6c + chn, fl);
+			}
+			if (*pf == (uint16_t)-1 || fh != pfh)
+			{
+				write_song_command(song, 0x70 + (chn<<2) + fh, 0);
+			}
+		}
+		else
+		{
+			if (((*pf)&4) != ((*f)&4))
+			{ /* noise mode change */
+				write_song_command(song, 0x6f, fl);
+			}
+			else if (((*pf)&3) != ((*f)&3))
+			{ /* only noise pitch change */
+				write_song_command(song, 0x70 + (chn<<2) + (fl&3), 0);
+			}
+		}
+		*pf = *f;
+	}
+}
+
+/* fully flush all state (used on wait commands/loop/end) */
+void flush_playback_state(song_t * song, playback_state_t * prv, playback_state_t * state)
+{
+	flush_fm_state(song, prv, state);
+	flush_psg_state(song, prv, state);
+
+	if (prv->sample_freq != state->sample_freq)
+	{
+		prv->sample_freq = state->sample_freq;
+
+		write_song_command(song, 0x65, state->sample_freq);
+	}
+}
+
+
+
+
+////////// histogram
 
 typedef struct {
 	unsigned id;
@@ -182,6 +427,7 @@ int histogram_ent_cmp_desc(const void * a, const void * b)
 	size_t cb = ((const histogram_ent_t*)b)->count;
 	return -((ca > cb) - (ca < cb));
 }
+
 
 
 
@@ -286,7 +532,6 @@ int load_vgm(char * vgm_filename)
 	size_t old_samples = samples;
 	size_t old_songs = songs;
 	size_t old_samples_size = samples_size;
-	size_t old_songs_size = songs_size;
 	
 	
 	/******** init variables **********/
@@ -364,224 +609,14 @@ int load_vgm(char * vgm_filename)
 	uint8_t *vlp = vgm_loop_offset ? vgm+vgm_loop_offset : NULL;
 	uint8_t *ve = vgm+vgm_size;
 	song.data = NULL;
-	song.size = 0;
-	size_t song_max = 0;
-	void wr(unsigned data)
-	{
-		if (song.size == song_max)
-		{
-			if (!song_max) song_max = 0x20000;
-			else song_max *= 2;
-			song.data = realloc(song.data,song_max);
-		}
-		song.data[song.size++] = data;
-	}
+	song.length = 0;
+	song.max = 0;
 	
-	/*************** playback state functions **************/
+	/*************** playback state **************/
 	playback_state_t state;
 	playback_state_t prv;
 	init_playback_state(&state);
 	init_playback_state(&prv);
-	
-	/* flushes fm patches if any of them changed */
-	void flush_fm_patches()
-	{
-		for (int chn = 0; chn < 6; chn++)
-		{
-			fm_patch_t *old = &prv.fm.patch[chn];
-			fm_patch_t *new = &state.fm.patch[chn];
-			if (!fm_patch_cmp(old,new)) continue;
-			
-			unsigned new_id = add_fm_patch(new);
-			memcpy(old, new, sizeof(*new));
-			
-			wr(3 + (chn << 4) + (new_id < 0x100 ? 0 : 1));
-			wr(new_id & 0xff);
-			if (new_id >= 0x100) wr(new_id >> 8);
-		}
-	}
-	
-	/* flushes fm freqs if any of them changed */
-	void flush_fm_freqs()
-	{
-		/******** normal fm channels *********/
-		for (int chn = 0; chn < 6; chn++)
-		{
-			uint16_t *old = &prv.fm.freq[chn];
-			uint16_t *new = &state.fm.freq[chn];
-			
-			int lodiff = ((*old)&0xff) != ((*new)&0xff);
-			int hidiff = ((*old)>>8) != ((*new)>>8);
-			
-			if (lodiff && hidiff)
-			{
-				wr((chn<<4) + 7);
-				wr((*new)&0xff);
-				wr((*new)>>8);
-			}
-			else if (lodiff)
-			{
-				wr((chn<<4) + 5);
-				wr((*new)&0xff);
-			}
-			else if (hidiff)
-			{
-				wr((chn<<4) + 6);
-				wr((*new)>>8);
-			}
-			
-			*old = *new;
-		}
-		
-		/********* ext.chn3 frequencies *************/
-		for (int op = 0; op < 3; op++)
-		{
-			uint16_t *old = &prv.fm.extd_freq[op];
-			uint16_t *new = &state.fm.extd_freq[op];
-			
-			int lodiff = ((*old)&0xff) != ((*new)&0xff);
-			int hidiff = ((*old)>>8) != ((*new)>>8);
-			
-			if (lodiff && hidiff)
-			{
-				wr((op<<4) + 0xa);
-				wr((*new)&0xff);
-				wr((*new)>>8);
-			}
-			else if (lodiff)
-			{
-				wr((op<<4) + 0x8);
-				wr((*new)&0xff);
-			}
-			else if (hidiff)
-			{
-				wr((op<<4) + 0x9);
-				wr((*new)>>8);
-			}
-			
-			*old = *new;
-		}
-	}
-	
-	/* flushes FM patches, freqs, and keyon state */
-	void flush_fm_keyon_state()
-	{
-		flush_fm_patches();
-		flush_fm_freqs();
-		
-		for (int chn = 0; chn < 6; chn++)
-		{
-			uint8_t *old = &prv.fm.keyon[chn];
-			uint8_t *new = &state.fm.keyon[chn];
-			
-			if (*old != *new)
-			{
-				*old = *new;
-				if (*new == 0x00)
-					wr((chn<<4) + 0);
-				else if (*new == 0xf0)
-					wr((chn<<4) + 1);
-				else
-				{
-					wr((chn<<4) + 2);
-					wr(*new);
-				}
-			}
-		}
-	}
-	
-	/* fully flush fm state */
-	void flush_fm_state()
-	{
-		flush_fm_keyon_state();
-		
-		if (prv.fm.chn3_mode != state.fm.chn3_mode)
-		{
-			prv.fm.chn3_mode = state.fm.chn3_mode;
-			
-			wr(0x60 + (state.fm.chn3_mode ? 1 : 0));
-		}
-		
-		if (prv.fm.dac_enable != state.fm.dac_enable)
-		{
-			prv.fm.dac_enable = state.fm.dac_enable;
-			
-			wr(0x62 + (state.fm.dac_enable ? 1 : 0));
-		}
-		
-		if (prv.fm.lfo != state.fm.lfo)
-		{
-			prv.fm.lfo = state.fm.lfo;
-			
-			wr(0x64);
-			wr(state.fm.lfo);
-		}
-	}
-	
-	/* fully flush psg state */
-	void flush_psg_state()
-	{
-		for (int chn = 0; chn < 4; chn++)
-		{
-			/* volume */
-			uint8_t *v = &state.psg.volume[chn];
-			uint8_t *pv = &prv.psg.volume[chn];
-			if (*v != *pv)
-			{
-				*pv = *v;
-				wr(0x80 + (chn<<4) + *v);
-			}
-			
-			/* freq */
-			uint16_t *f = &state.psg.freq[chn];
-			uint8_t fl = (*f) & 0xff;
-			uint8_t fh = (*f) >> 8;
-			uint16_t *pf = &prv.psg.freq[chn];
-			uint8_t pfl = (*pf) & 0xff;
-			uint8_t pfh = (*pf) >> 8;
-			if (chn != 3)
-			{
-				if (*pf == (uint16_t)-1 || fl != pfl)
-				{ 
-					wr(0x6c + chn);
-					wr(fl);
-				}
-				if (*pf == (uint16_t)-1 || fh != pfh)
-				{
-					wr(0x70 + (chn<<2) + fh);
-				}
-			}
-			else
-			{
-				if (((*pf)&4) != ((*f)&4))
-				{ /* noise mode change */
-					wr(0x6f);
-					wr(fl);
-				}
-				else if (((*pf)&3) != ((*f)&3))
-				{ /* only noise pitch change */
-					wr(0x70 + (chn<<2) + (fl&3));
-				}
-			}
-			*pf = *f;
-		}
-	}
-	
-	/* fully flush all state (used on wait commands/loop/end) */
-	void flush_playback_state()
-	{
-		flush_fm_state();
-		flush_psg_state();
-		
-		if (prv.sample_freq != state.sample_freq)
-		{
-			prv.sample_freq = state.sample_freq;
-			
-			wr(0x65);
-			wr(state.sample_freq&0xff);
-			wr(state.sample_freq>>8);
-		}
-	}
 	
 	unsigned psg_latch = 0;
 	
@@ -609,8 +644,8 @@ int load_vgm(char * vgm_filename)
 		/****************** END COMMAND *********************/
 		if (c == 0x66)
 		{ /* end */
-			flush_playback_state();
-			wr(0x6b);
+			flush_playback_state(&song, &prv, &state);
+			write_song_command(&song, 0x6b, 0);
 			break;
 		}
 		/********************* DATA BLOCKS *******************/
@@ -673,7 +708,7 @@ int load_vgm(char * vgm_filename)
 			unsigned sid = *vp++;
 			if (sid == active_stream_id)
 			{
-				wr(0x68);
+				write_song_command(&song, 0x68, 0);
 			}
 		}
 		else if (c == 0x95)
@@ -710,7 +745,7 @@ int load_vgm(char * vgm_filename)
 				
 				if (!new.size)
 				{ /* we cropped everything (or the sample is just empty), just stop */
-					wr(0x68);
+					write_song_command(&song, 0x68, 0);
 				}
 				else
 				{
@@ -726,8 +761,7 @@ int load_vgm(char * vgm_filename)
 					}
 					
 					/* command */
-					wr(0x66 + ((flags & 1) ? 1 : 0));
-					wr(new_id);
+					write_song_command(&song, 0x66 + ((flags & 1) ? 1 : 0), new_id);
 				}
 			}
 		}
@@ -815,7 +849,7 @@ int load_vgm(char * vgm_filename)
 						if (v != *ko)
 						{
 							*ko = v;
-							flush_fm_keyon_state();
+							flush_fm_keyon_state(&song, &prv, &state);
 						}
 					}
 					
@@ -903,7 +937,7 @@ int load_vgm(char * vgm_filename)
 				vp++;
 			}
 			
-			flush_playback_state();
+			flush_playback_state(&song, &prv, &state);
 			
 			unsigned ntsc_frames = current_wait / NTSC_INTERVAL;
 			unsigned ntsc_extra = current_wait % NTSC_INTERVAL;
@@ -915,7 +949,7 @@ int load_vgm(char * vgm_filename)
 				while (ntsc_frames > 0)
 				{
 					unsigned i = min(ntsc_frames,0x20);
-					wr(0xc0 + (i - 1));
+					write_song_command(&song, 0xc0 + (i - 1), 0);
 					ntsc_frames -= i;
 				}
 			}
@@ -924,7 +958,7 @@ int load_vgm(char * vgm_filename)
 				while (pal_frames > 0)
 				{
 					unsigned i = min(pal_frames,0x20);
-					wr(0xe0 + (i - 1));
+					write_song_command(&song, 0xe0 + (i - 1), 0);
 					pal_frames -= i;
 				}
 			}
@@ -933,9 +967,7 @@ int load_vgm(char * vgm_filename)
 				while (current_wait > 0)
 				{
 					unsigned i = min(current_wait,0xffff);
-					wr(0x69);
-					wr(i & 0xff);
-					wr(i >> 8);
+					write_song_command(&song, 0x69, i);
 					current_wait -= i;
 				}
 			}
@@ -969,16 +1001,16 @@ int load_vgm(char * vgm_filename)
 			}
 			else if (vp == vlp)
 			{
-				flush_playback_state();
-				wr(0x6a);
+				flush_playback_state(&song, &prv, &state);
+				write_song_command(&song, 0x6a, 0);
 				loop_hit = 1;
 			}
 		}
 		
 		/******************* peculiar behavior failsafes ****************/
-		if (song.size > 0x100000)
+		if (song.length > 0x100000)
 		{
-			puts("Passed 0x100000 output bytes. This either indicates a bug in this program or an extremely large VGM file.");
+			puts("Passed 0x100000 output commands. This either indicates a bug in this program or an extremely large VGM file.");
 			goto load_vgm_fail;
 		}
 		
@@ -999,7 +1031,6 @@ int load_vgm(char * vgm_filename)
 	puts("Success.");
 	return_val = 0;
 	
-	songs_size += song.size;
 	add_song(&song);
 	
 	goto load_vgm_cleanup;
@@ -1019,7 +1050,6 @@ load_vgm_fail:
 	samples = old_samples;
 	songs = old_songs;
 	samples_size = old_samples_size;
-	songs_size = old_songs_size;
 	
 	
 load_vgm_cleanup:
@@ -1115,10 +1145,22 @@ int main(int argc, char *argv[])
 		song_t *s = &song_tbl[i];
 		fprintf(f,"\nknl_song_%zu: db ",i);
 		
-		for (size_t j = 0; j < s->size; j++)
+		for (size_t j = 0; j < s->length; j++)
 		{
-			fprintf(f,"$%02X",s->data[j]);
-			if (j < s->size-1) fputc(',',f);
+			const song_command_t * sc = &s->data[j];
+			unsigned command_size = command_size_tbl[sc->cmd];
+			if (!command_size) {
+				printf("Illegal command %02X found in song %zu\n", sc->cmd, i);
+				return EXIT_FAILURE;
+			}
+			fprintf(f,"%u",sc->cmd);
+			for (unsigned b = 1; b < command_size; b++) {
+				fprintf(f,",%u",(sc->param>>(8*(b-1)))&0xff);
+			}
+			if (j < s->length-1) {
+				fputc(',', f);
+				fputc(' ', f);
+			}
 		}
 	}
 	
