@@ -16,11 +16,13 @@
 data stream format:
 
 CONTROL COMMANDS:
-	$e0-$ff - wait for $xx 50hz intervals
+	$67 $yyyyyy - jump
+	$68 $yyyyyy - call
+	$69 - set loop point
+	$6a - if in a call return, else loop if there is a loop, otherwise stop
+	$6b $yyyy - wait for $yyyy 44100hz intervals
 	$c0-$df - wait for $xx 60hz intervals
-	$69 $xxxx - wait for $xxxx 44100hz intervals
-	$6a - set loop point
-	$6b - loop if there is a loop, otherwise stop
+	$e0-$ff - wait for $xx 50hz intervals
 
 PSG COMMANDS:
 	$6c-$6f $xx - psg low frequency to $xx (or noise mode/pitch on PSG)
@@ -41,15 +43,13 @@ FM COMMANDS:
 		$x8 $yy - set low frequency to $yy
 		$x9 $yy - set high frequency to $yy
 		$xa $yyyy - set frequency to $yyyy
-	$60 - normal chn.3 mode
-	$61 - extd. chn.3 mode
-	$62 - DAC disable
-	$63 - DAC enable
-	$64 $yy - set LFO to $yy
-	$65 $yyyy - set sample output frequency to $yyyy
-	$66 $yy - start sample $yy
-	$67 $yy - start looped sample $yy
-	$68 - stop sample
+	$60 $yy - set chn.3 mode (0=normal, 1=extd)
+	$61 $yy - toggle DAC
+	$62 $yy - set LFO to $yy
+	$63 $yyyy - set sample output frequency to $yyyy
+	$64 $yy - start sample $yy
+	$65 $yy - start looped sample $yy
+	$66 - stop sample
 
 */
 
@@ -62,7 +62,7 @@ const unsigned char command_size_tbl[0x100] = {
 	1,1,2,2,3,2,2,3,0,0,0,0,0,0,0,0,
 	1,1,2,2,3,2,2,3,0,0,0,0,0,0,0,0,
 	// 60-6f control and psg low-freq
-	1,1,1,1,2,3,2,2,1,3,1,1,2,2,2,2,
+	2,2,2,3,2,2,1,4,4,1,1,3,2,2,2,2,
 	// 70-bf psg main
 	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
 	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
@@ -168,14 +168,15 @@ unsigned add_sample(sample_t *);	// forward-declare add function
 /////////// song
 
 typedef struct {	// this struct should always be memset before use to allow safe memcmp'ing
-	unsigned char cmd;
+	unsigned cmd;
 	unsigned param;
 } song_command_t;
 typedef struct {
 	song_command_t * data;
 	size_t length;
 	size_t max;	// current allocated length of data array
-} song_t;
+} song_command_sequence_t;
+typedef song_command_sequence_t song_t;
 int song_cmp(song_t *a, song_t *b)
 {
 	if (a->length != b->length) return 1;
@@ -333,21 +334,21 @@ void flush_fm_state(song_t * song, playback_state_t * prv, playback_state_t * st
 	{
 		prv->fm.chn3_mode = state->fm.chn3_mode;
 
-		write_song_command(song, 0x60 + (state->fm.chn3_mode ? 1 : 0), 0);
+		write_song_command(song, 0x60, (state->fm.chn3_mode ? 1 : 0));
 	}
 
 	if (prv->fm.dac_enable != state->fm.dac_enable)
 	{
 		prv->fm.dac_enable = state->fm.dac_enable;
 
-		write_song_command(song, 0x62 + (state->fm.dac_enable ? 1 : 0), 0);
+		write_song_command(song, 0x61, (state->fm.dac_enable ? 1 : 0));
 	}
 
 	if (prv->fm.lfo != state->fm.lfo)
 	{
 		prv->fm.lfo = state->fm.lfo;
 
-		write_song_command(song, 0x64, state->fm.lfo);
+		write_song_command(song, 0x62, state->fm.lfo);
 	}
 }
 
@@ -408,7 +409,7 @@ void flush_playback_state(song_t * song, playback_state_t * prv, playback_state_
 	{
 		prv->sample_freq = state->sample_freq;
 
-		write_song_command(song, 0x65, state->sample_freq);
+		write_song_command(song, 0x63, state->sample_freq);
 	}
 }
 
@@ -645,7 +646,7 @@ int load_vgm(char * vgm_filename)
 		if (c == 0x66)
 		{ /* end */
 			flush_playback_state(&song, &prv, &state);
-			write_song_command(&song, 0x6b, 0);
+			write_song_command(&song, 0x6a, 0);
 			break;
 		}
 		/********************* DATA BLOCKS *******************/
@@ -708,7 +709,7 @@ int load_vgm(char * vgm_filename)
 			unsigned sid = *vp++;
 			if (sid == active_stream_id)
 			{
-				write_song_command(&song, 0x68, 0);
+				write_song_command(&song, 0x66, 0);
 			}
 		}
 		else if (c == 0x95)
@@ -745,7 +746,7 @@ int load_vgm(char * vgm_filename)
 				
 				if (!new.size)
 				{ /* we cropped everything (or the sample is just empty), just stop */
-					write_song_command(&song, 0x68, 0);
+					write_song_command(&song, 0x66, 0);
 				}
 				else
 				{
@@ -761,7 +762,7 @@ int load_vgm(char * vgm_filename)
 					}
 					
 					/* command */
-					write_song_command(&song, 0x66 + ((flags & 1) ? 1 : 0), new_id);
+					write_song_command(&song, 0x64 + ((flags & 1) ? 1 : 0), new_id);
 				}
 			}
 		}
@@ -967,7 +968,7 @@ int load_vgm(char * vgm_filename)
 				while (current_wait > 0)
 				{
 					unsigned i = min(current_wait,0xffff);
-					write_song_command(&song, 0x69, i);
+					write_song_command(&song, 0x6b, i);
 					current_wait -= i;
 				}
 			}
@@ -1002,7 +1003,7 @@ int load_vgm(char * vgm_filename)
 			else if (vp == vlp)
 			{
 				flush_playback_state(&song, &prv, &state);
-				write_song_command(&song, 0x6a, 0);
+				write_song_command(&song, 0x69, 0);
 				loop_hit = 1;
 			}
 		}
@@ -1032,6 +1033,9 @@ int load_vgm(char * vgm_filename)
 	return_val = 0;
 	
 	add_song(&song);
+	for (size_t i = 0; i < song.length; i++) {
+		songs_size += command_size_tbl[song.data[i].cmd];
+	}
 	
 	goto load_vgm_cleanup;
 	
@@ -1063,6 +1067,673 @@ load_vgm_cleanup:
 
 
 
+/********************** song datastream compression **********************/
+// the basic idea of the compression is that we want to find sequences of
+// commands which regularly appear in the song datastreams and turn these
+// into "subroutines" which we only include once and call instead.
+// we use a recursive pairing algorithm to find these sequences- for each
+// iteration, find the most commonly occurring sequential pair in the datastream
+// and turn instances of this into a single "token". repeat until no repeating
+// pairs exist.
+// this kind of compression is better for our use case as we don't need any kind
+// of backbuffer/dictionary in z80 ram, we just need a call stack for each song slot
+
+// a few notes:
+// - the "loop point here" and "loop/stop" commands may not be part of a subroutine
+// - if a particular subroutine encompasses another subroutine "from the left", we
+//   can fold these into a single routine. e.g. if we have a routine "A B C D", we
+//   can call the routine in full or call partway starting at "B" to make "B C D"
+
+#define SONG_CMD	((unsigned)-4)	// used to define song starts in the compressed datastream
+#define LAB_CMD	((unsigned)-3)	// used to define label numbers in the compressed datastream
+#define NOP_CMD ((unsigned)-2)	// temporary cmd value used to hold "holes" in the datastream
+#define CALL_CMD	((unsigned)-1)	// temporary cmd value used when building the pairs to denote a token id
+
+#define INSTANCE_NONE (~(size_t)0)
+
+#define SEQUENCE_NONE (~(size_t)0)
+#define SEQUENCE_INLINE (~(size_t)1)
+
+#define CALL_SIZE 4
+#define INLINE_THRESHOLD 5	// subroutines <= this size are never created
+
+#define CALL_NEST_LIMIT 32
+
+/////////////////////// pair (all pairs in data, used when building the dictionary)
+
+typedef struct {
+	size_t left;	// left and right are stored separately as there could be a "NOP_CMD" between the pair elements
+	size_t right;	// INSTANCE_NONE indicates this entry is no longer valid
+} song_command_pair_instance_t;
+
+typedef struct {
+	size_t pair_index;
+	size_t ii;
+} song_command_pair_instance_ptr_t;
+
+typedef struct {
+	song_command_t pair[2];
+	unsigned freq;	// actual amount of instances
+	song_command_pair_instance_t * instance_tbl;	// list of instances of this pair
+	size_t instances_max;	// allocated space for instances table
+	size_t instances_length;	// length of instances table, including null-entries
+} song_command_pair_t;
+
+typedef struct {
+	song_command_pair_t * pairs;	// the pair table itself
+	size_t length;
+	size_t max;
+	size_t first_free;
+
+	size_t highest_pair;
+	unsigned highest_pair_freq;
+
+	song_command_pair_instance_ptr_t * left_instance_tbl;	// table that maps source data -> pairs
+	song_command_pair_instance_ptr_t * right_instance_tbl;	// table that maps source data -> pairs
+} song_command_pair_list_t;
+
+void remove_pair(song_command_pair_list_t * list, size_t pair_index) {
+	song_command_pair_t * p = &list->pairs[pair_index];
+
+	p->instances_length = 0;
+	if (pair_index < list->first_free) {
+		list->first_free = pair_index;
+	}
+}
+
+void remove_pair_instance(song_command_pair_list_t * list, song_command_pair_instance_ptr_t * ip) {
+	size_t pair_index = ip->pair_index;
+	if (pair_index < list->length) {
+		song_command_pair_t * p = &list->pairs[pair_index];
+		if (ip->ii < p->instances_length) {
+			song_command_pair_instance_t * i = &p->instance_tbl[ip->ii];
+			if (i->left != INSTANCE_NONE && i->right != INSTANCE_NONE) {
+				list->left_instance_tbl[i->left].pair_index = INSTANCE_NONE;
+				list->right_instance_tbl[i->right].pair_index = INSTANCE_NONE;
+				i->left = INSTANCE_NONE;
+				i->right = INSTANCE_NONE;
+				p->freq--;
+				if (!p->freq) {
+					remove_pair(list, pair_index);
+				}
+			}
+		}
+	}
+}
+
+size_t add_pair_instance(song_command_pair_list_t * list, song_command_t * left, song_command_t * right, size_t left_i, size_t right_i) {
+	// try finding an instance of this pair in the list already
+	size_t found_i = INSTANCE_NONE;
+	song_command_pair_t * p = NULL;
+	for (size_t i = 0; i < list->length; i++) {
+		p = &list->pairs[i];
+		if (!memcmp(left, &p->pair[0], sizeof(song_command_t)) && !memcmp(right, &p->pair[1], sizeof(song_command_t))) {
+			found_i = i;
+			break;
+		}
+	}
+
+	// if nothing was found then create a new pair, otherwise add this instance to the old pair
+	if (found_i == INSTANCE_NONE) {
+		found_i = list->first_free;
+		if (found_i == list->max) {
+			list->max *= 2;
+			list->pairs = realloc(list->pairs, list->max * sizeof(*list->pairs));
+		}
+		if (list->first_free++ == list->length) {
+			list->length++;
+		}
+
+		p = &list->pairs[found_i];
+		memcpy(&p->pair[0], left, sizeof(song_command_t));
+		memcpy(&p->pair[1], right, sizeof(song_command_t));
+		p->freq = 0;
+		p->instance_tbl = malloc(0x10 * sizeof(*p->instance_tbl));
+		p->instances_length = 0;
+		p->instances_max = 0x10;
+
+		while (list->first_free < list->length && list->pairs[list->first_free].freq != 0) {
+			list->first_free++;
+		}
+	} else {
+		if (p->instances_length == p->instances_max) {
+			p->instances_max *= 2;
+			p->instance_tbl = realloc(p->instance_tbl, p->instances_max * sizeof(*p->instance_tbl));
+		}
+	}
+	p->instance_tbl[p->instances_length].left = left_i;
+	p->instance_tbl[p->instances_length].right = right_i;
+	list->left_instance_tbl[left_i].pair_index = found_i;
+	list->right_instance_tbl[right_i].pair_index = found_i;
+	list->left_instance_tbl[left_i].ii = p->instances_length;
+	list->right_instance_tbl[right_i].ii = p->instances_length;
+	p->instances_length++;
+	p->freq++;
+
+	return found_i;
+}
+
+void update_highest_pair(song_command_pair_list_t * list) {
+	list->highest_pair = -1;
+	list->highest_pair_freq = 0;
+	for (size_t pi = 0; pi < list->length; pi++) {
+		song_command_pair_t * p = &list->pairs[pi];
+		if (p->freq > list->highest_pair_freq) {
+			list->highest_pair_freq = p->freq;
+			list->highest_pair = pi;
+		}
+	}
+}
+
+void init_pair_list(song_command_pair_list_t * list, song_command_t * data, size_t length) {
+	// initialize data structure
+	list->pairs = malloc(length * sizeof(*list->pairs));
+	list->length = 0;
+	list->max = length;
+	list->first_free = 0;
+
+	list->highest_pair = -1;
+	list->highest_pair_freq = 0;
+
+	list->left_instance_tbl = malloc(length * sizeof(*list->left_instance_tbl));
+	list->right_instance_tbl = malloc(length * sizeof(*list->right_instance_tbl));
+	memset(list->left_instance_tbl, -1, length * sizeof(*list->left_instance_tbl));
+	memset(list->right_instance_tbl, -1, length * sizeof(*list->right_instance_tbl));
+
+	// do the first pass through the input data
+	for (size_t index = 0; index < length-1; index++) {
+		song_command_t * this = &data[index];
+
+		// if either this or the next pair would have an invalid control command then skip
+		if (this[0].cmd == 0x69 || this[1].cmd == 0x69 || this[0].cmd == 0x6a || this[1].cmd == 0x6a) {
+			continue;
+		}
+
+		// otherwise add this pair to the list
+		size_t pair_index = add_pair_instance(list, &this[0], &this[1], index+0, index+1);
+		unsigned pair_freq = list->pairs[pair_index].freq;
+		if (pair_freq > list->highest_pair_freq) {
+			list->highest_pair_freq = pair_freq;
+			list->highest_pair = pair_index;
+		}
+	}
+}
+
+void free_pair_list(song_command_pair_list_t * list) {
+	for (size_t i = 0; i < list->length; i++) {
+		free(list->pairs[i].instance_tbl);
+	}
+	free(list->pairs);
+	free(list->left_instance_tbl);
+	free(list->right_instance_tbl);
+}
+
+
+/////////////////////// dictionary (final list of pairs)
+
+typedef struct {
+	song_command_t pair[2];
+	size_t raw_size;	// size of the two commands if completely expanded
+	size_t calls_from_main;	// amount of times this pair is called from main
+	size_t left_refs;	// amount of times a call to this pair appears on the left side of another
+	size_t left_from;	// if this entry is only referenced to the left once, this is where from
+	size_t right_refs;	// amount of times a call to this pair appears on the right side of another
+	size_t right_from;	// if this entry is only referenced to the right once, this is where from
+
+	size_t sequence_id;	// sequence id this dict belongs to
+	size_t sequence_index;	// index in sequence relative to left
+	size_t sequence_size;	// size of the sequence starting from here
+	size_t sequence_call_count;	// amount of times the sequence is called from here (NOT inlined)
+} song_command_pair_dict_t;
+
+typedef struct {
+	size_t left;	// leftmost pair id in dictionary
+	size_t right;	// rightmost pair id in dictionary
+	size_t length;	// length of the sequence in dictionary entries (command length is this + 1)
+	size_t minimum_eligible_index;	// first index of the sequence that can be turned into a subroutine
+	size_t call_level;	// how many nested subroutines deep calling this sequence would result in
+} song_command_pair_dict_sequence_t;
+
+
+//////////////////////// main compression procedure
+
+song_command_sequence_t compressed_song_data;
+
+int write_compressed_call_command(song_command_sequence_t * song, song_command_pair_dict_t * dict_tbl, song_command_pair_dict_sequence_t * seq_tbl, size_t di, size_t * size_ptr, int is_end);	// forward-declare
+
+int write_compressed_song_command(song_command_sequence_t * song, song_command_pair_dict_t * dict_tbl, song_command_pair_dict_sequence_t * seq_tbl, unsigned cmd, unsigned param, size_t * size_ptr, int is_end) {
+	if (cmd == CALL_CMD) {
+		return write_compressed_call_command(song, dict_tbl, seq_tbl, param, size_ptr, is_end);
+	} else if (cmd < 0x100) {
+		write_song_command(song, cmd, param);
+		*size_ptr += command_size_tbl[cmd];
+	}
+	return 0;
+}
+
+int write_compressed_call_command(song_command_sequence_t * song, song_command_pair_dict_t * dict_tbl, song_command_pair_dict_sequence_t * seq_tbl, size_t di, size_t * size_ptr, int is_end) {
+	song_command_pair_dict_t * d = &dict_tbl[di];
+	song_command_pair_dict_sequence_t * s = &seq_tbl[d->sequence_id];
+
+	if (s->minimum_eligible_index == SEQUENCE_NONE || s->call_level >= CALL_NEST_LIMIT || d->sequence_size <= INLINE_THRESHOLD) {
+		// sequence is not subroutine-eligible at all, just inline it
+		for (size_t i = d->sequence_index; i < s->length; i++) {
+			write_compressed_song_command(song, dict_tbl, seq_tbl, d->pair[0].cmd, d->pair[0].param, size_ptr, 0);
+			if (i < s->length-1) {
+				d = &dict_tbl[d->pair[1].param];
+			}
+		}
+		write_compressed_song_command(song, dict_tbl, seq_tbl, d->pair[1].cmd, d->pair[1].param, size_ptr, 0);
+		return 0;
+	} else {
+		// subroutine is eligible, inline until we hit the eligible index then emit a call
+		for (size_t i = d->sequence_index; i < s->minimum_eligible_index; i++) {
+			write_compressed_song_command(song, dict_tbl, seq_tbl, d->pair[0].cmd, d->pair[0].param, size_ptr, 0);
+			di = d->pair[1].param;
+			d = &dict_tbl[di];
+		}
+		write_compressed_song_command(song, dict_tbl, seq_tbl, is_end ? 0x67 : 0x68, di, size_ptr, is_end);
+		return 1;
+	}
+}
+
+void compress_song_data(int max_iterations, unsigned pair_freq_threshold) {
+	clock_t start_time = clock();
+	printf("Compressing song data...");
+	fflush(stdout);
+
+	///////////////////////////////////////////////// PHASE 1: do re-pair algorithm
+	// build the complete song datastream
+	size_t all_song_data_length = 0;
+	for (size_t i = 0; i < songs; i++) {
+		all_song_data_length += song_tbl[i].length;
+	}
+	song_command_t * all_song_data = malloc(all_song_data_length * sizeof(song_command_t));
+	size_t all_song_data_index = 0;
+	for (size_t i = 0; i < songs; i++) {
+		memcpy(&all_song_data[all_song_data_index], song_tbl[i].data, song_tbl[i].length*sizeof(song_command_t));
+		all_song_data_index += song_tbl[i].length;
+	}
+
+	// run through the song data and find initial set of pairs
+	printf("initializing...");
+	fflush(stdout);
+
+	song_command_pair_list_t pair_list;
+	init_pair_list(&pair_list, all_song_data, all_song_data_length);
+
+	// begin main iteration loop of finding most common pair and replacing sequences
+	int iter = 0;
+	song_command_pair_dict_t * dict_tbl = malloc(0x20000 * sizeof(*dict_tbl));
+	size_t dict_max = 0x20000;
+	size_t dict_length = 0;
+	int fib[3] = {0,1,1};
+	while (iter < max_iterations && pair_list.highest_pair_freq >= pair_freq_threshold) {
+		iter++;
+		if (iter >= fib[2]) {	// iterations get faster so we don't want to print on every one
+			printf("%d...", iter);
+			fflush(stdout);
+
+			fib[0] = fib[1];
+			fib[1] = fib[2];
+			fib[2] = fib[0] + fib[1];
+		}
+
+		song_command_pair_t * p = &pair_list.pairs[pair_list.highest_pair];
+
+		// add the replaced pair to the dictionary
+		if (dict_length == dict_max) {
+			dict_max *= 2;
+			dict_tbl = realloc(dict_tbl, dict_max * sizeof(*dict_tbl));
+		}
+		size_t di = dict_length++;
+		song_command_pair_dict_t * this_dict = &dict_tbl[di];
+		memset(this_dict, 0, sizeof(*this_dict));
+		memcpy(this_dict->pair, p->pair, sizeof(song_command_t[2]));
+		for (int i = 0; i < 2; i++) {
+			unsigned cmd = this_dict->pair[i].cmd;
+			unsigned param = this_dict->pair[i].param;
+			if (cmd == CALL_CMD) {
+				song_command_pair_dict_t * ref_dict = &dict_tbl[param];
+				this_dict->raw_size += ref_dict->raw_size;
+				if (i) {
+					ref_dict->right_refs++;
+					ref_dict->right_from = di;
+				} else {
+					ref_dict->left_refs++;
+					ref_dict->left_from = di;
+				}
+			} else {
+				this_dict->raw_size += command_size_tbl[cmd];
+			}
+		}
+		this_dict->sequence_id = SEQUENCE_NONE;
+
+		// replace all instances of the pair with a single value and recalculate the pairs
+		for (size_t ii = 0; ii < p->instances_length; ii++) {
+			song_command_pair_instance_t * i = &p->instance_tbl[ii];
+			size_t left = i->left;
+			size_t right = i->right;
+			if (left != INSTANCE_NONE && right != INSTANCE_NONE) {
+				song_command_pair_instance_ptr_t * ip = &pair_list.left_instance_tbl[left];
+
+				all_song_data[left].cmd = CALL_CMD;
+				all_song_data[left].param = di;
+				all_song_data[right].cmd = NOP_CMD;
+				all_song_data[right].param = 0;
+
+				// find the new right part of the pair and invalidate any pairs now containing a NOP_CMD
+				size_t new_right = right;
+				while (new_right < all_song_data_length && all_song_data[new_right].cmd == NOP_CMD) {
+					remove_pair_instance(&pair_list, &pair_list.left_instance_tbl[new_right++]);
+				}
+				if (new_right >= all_song_data_length || all_song_data[new_right].cmd == 0x69 || all_song_data[new_right].cmd == 0x6a)
+					new_right = INSTANCE_NONE;
+
+				// update the pair relying on the left side we just replaced, if any
+				song_command_pair_instance_ptr_t * left_inst_ptr = &pair_list.right_instance_tbl[left];
+				if (left_inst_ptr->pair_index != INSTANCE_NONE) {
+					song_command_pair_t * left_pair = &pair_list.pairs[left_inst_ptr->pair_index];
+					song_command_pair_instance_t * left_pair_i = &left_pair->instance_tbl[left_inst_ptr->ii];
+					size_t left_pair_left = left_pair_i->left;
+					remove_pair_instance(&pair_list, left_inst_ptr);
+					add_pair_instance(&pair_list, &all_song_data[left_pair_left], &all_song_data[left], left_pair_left, left);
+				}
+
+				// add the new pair for this replacement
+				remove_pair_instance(&pair_list, ip);
+				if (new_right != INSTANCE_NONE) {
+					add_pair_instance(&pair_list, &all_song_data[left], &all_song_data[new_right], left, new_right);
+				}
+			}
+		}
+
+		dict_length++;
+
+		// find the next most common pair
+		update_highest_pair(&pair_list);
+	}
+	if (pair_list.highest_pair_freq >= pair_freq_threshold) {
+		printf("hit %d-iteration limit.\n", iter);
+	} else {
+		printf("completed in %d iterations.\n", iter);
+	}
+	free_pair_list(&pair_list);
+
+
+	//////////////////////////////////////////////////// PHASE 2: using the dictionary find candidates
+	printf("Finding subroutine candidates...");
+	fflush(stdout);
+
+	// collect some stats on the dictionary
+	for (size_t i = 0; i < all_song_data_length; i++) {
+		if (all_song_data[i].cmd == CALL_CMD) {
+			dict_tbl[all_song_data[i].param].calls_from_main++;
+		}
+	}
+
+	// extract linear sequences from the pair dictionary
+	// these will form the basis of our subroutines
+	song_command_pair_dict_sequence_t * seq_tbl = malloc(dict_length * sizeof(*seq_tbl));
+	memset(seq_tbl, 0, dict_length * sizeof(*seq_tbl));
+	size_t seqs = 0;
+	size_t * seq_chain = malloc(0x40 * sizeof(*seq_chain));
+	size_t seq_chain_max = 0x40;
+	for (size_t di = 0; di < dict_length; di++) {
+		song_command_pair_dict_t * d = &dict_tbl[di];
+		if (d->sequence_id == SEQUENCE_NONE) {
+			size_t si = seqs++;
+			song_command_pair_dict_sequence_t * s = &seq_tbl[si];
+
+			// move left through the dictionary to find the leftmost element of this sequence
+			size_t left = di;
+			size_t length = 1;
+			size_t left_length = 1;
+			seq_chain[0] = di;
+			song_command_pair_dict_t * dl = d;
+			while (
+				!dl->left_refs	// if we are ever referenced from the left then this is the leftmost element
+				&& dl->right_refs >= 1	// must have been referenced from the right at least once, else this is the leftmost
+				&& (dl->right_refs == 1 || dict_tbl[dl->right_from].sequence_id == SEQUENCE_NONE)	// either only referenced from the right once, or this is the "canonical" right-reference
+			) {
+				if (left_length == seq_chain_max) {
+					seq_chain_max *= 2;
+					seq_chain = realloc(seq_chain, seq_chain_max*sizeof(*seq_chain));
+				}
+
+				left = dl->right_from;
+				dl = &dict_tbl[left];
+				length++;
+				seq_chain[left_length++] = left;
+			}
+
+			// move right to find the rightmost element
+			size_t right = di;
+			song_command_pair_dict_t * dr = d;
+			while (dr->pair[1].cmd == CALL_CMD) {
+				size_t next = dr->pair[1].param;
+				dr = &dict_tbl[next];
+				if (
+					dr->left_refs	// if next is ever referenced from the left, then this is the end of the sequence
+					|| dr->right_from != right	// if we're not the "canonical" right-reference then this is the end
+				) {
+					break;
+				}
+
+				right = next;
+
+				dr->sequence_id = si;
+				dr->sequence_index = length++;
+			}
+
+			// update sequence information for the left side
+			size_t li = left_length;
+			do {
+				li--;
+				song_command_pair_dict_t * dl = &dict_tbl[seq_chain[li]];
+				dl->sequence_id = si;
+				dl->sequence_index = (left_length-1) - li;
+			} while (li > 0);
+
+			// update sequence information
+			s->left = left;
+			s->right = right;
+			s->length = length;
+		}
+	}
+	free(seq_chain);
+	seq_chain = NULL;
+	printf("%zu linear sequences...", seqs);
+	fflush(stdout);
+
+	// for each sequence go through and fill in the sizes and call count
+	for (size_t si = 0; si < seqs; si++) {
+		song_command_pair_dict_sequence_t * s = &seq_tbl[si];
+		size_t di = s->right;
+		size_t raw_size = 0;
+		while (1) {
+			song_command_pair_dict_t * d = &dict_tbl[di];
+			d->sequence_call_count = d->calls_from_main;
+			for (int i = 0; i < (di == s->right ? 2 : 1); i++) {
+				unsigned cmd = d->pair[i].cmd;
+				if (cmd == CALL_CMD) {
+					song_command_pair_dict_t * dref = &dict_tbl[d->pair[i].param];
+					if (dref->raw_size <= INLINE_THRESHOLD) {
+						raw_size += dref->raw_size;
+					} else {
+						raw_size += CALL_SIZE;
+						dref->sequence_call_count++;
+					}
+				} else {
+					raw_size += command_size_tbl[cmd];
+				}
+				d->sequence_size = raw_size;
+			}
+
+			if (di == s->left) {
+				break;
+			}
+			di = d->right_from;
+		}
+	}
+
+	// ok, we now have enough to start building our subroutines.
+	// we only deal with "eligible" linear sequences (call count > 1, and size over the inline threshold)
+	size_t eligible_subroutines = 0;
+	for (size_t si = 0; si < seqs; si++) {
+		song_command_pair_dict_sequence_t * s = &seq_tbl[si];
+		s->minimum_eligible_index = SEQUENCE_NONE;
+		size_t di = s->left;
+		size_t i = 0;
+		while (1) {
+			song_command_pair_dict_t * d = &dict_tbl[di];
+			if (d->sequence_call_count > 1 && d->sequence_size > INLINE_THRESHOLD) {
+				s->minimum_eligible_index = i;
+				s->call_level = SEQUENCE_NONE;
+				eligible_subroutines++;
+				break;
+			}
+			if (di == s->right) {
+				break;
+			}
+			di = d->pair[1].param;
+			i++;
+		}
+	}
+	printf("%zu eligible subroutines...", eligible_subroutines);
+	fflush(stdout);
+
+	// go through the eligible subroutines and set their "call level"
+	// subroutines with call levels higher than the nest limit are not eligible
+	size_t unknown_call_levels = eligible_subroutines;
+	for (int iter = 0; iter <= CALL_NEST_LIMIT && unknown_call_levels; iter++) {
+		for (size_t si = 0; si < seqs; si++) {
+			song_command_pair_dict_sequence_t * s = &seq_tbl[si];
+			if (s->minimum_eligible_index != SEQUENCE_NONE && s->call_level == SEQUENCE_NONE) {
+				size_t di = s->left;
+				size_t i = 0;
+				while (i < s->minimum_eligible_index) {
+					di = dict_tbl[di].pair[1].param;
+					i++;
+				}
+
+				int calls = 0;
+				size_t max_call_level = 0;
+				while (1) {
+					song_command_pair_dict_t * d = &dict_tbl[di];
+					for (int i = 0; i < (di==s->right ? 2 : 1); i++) {
+						if (d->pair[i].cmd == CALL_CMD) {
+							song_command_pair_dict_t * dref = &dict_tbl[d->pair[i].param];
+							song_command_pair_dict_sequence_t * sref = &seq_tbl[dref->sequence_id];
+							if (sref->minimum_eligible_index != SEQUENCE_NONE && dref->sequence_index >= sref->minimum_eligible_index) {
+								if (sref->call_level == SEQUENCE_NONE)
+									goto sub_call_level_unknown;
+
+								calls++;
+								if (sref->call_level > max_call_level) {
+									max_call_level = sref->call_level;
+								}
+							}
+						}
+					}
+
+					if (di == s->right)
+						break;
+					di = d->pair[1].param;
+				}
+
+				s->call_level = calls ? max_call_level + 1 : 0;
+				if (s->call_level >= CALL_NEST_LIMIT) {
+					eligible_subroutines--;
+				}
+				unknown_call_levels--;
+			}
+sub_call_level_unknown:;
+		}
+	}
+	if (unknown_call_levels) {
+		for (size_t si = 0; si < seqs; si++) {
+			song_command_pair_dict_sequence_t * s = &seq_tbl[si];
+			if (s->call_level == SEQUENCE_NONE) {
+				eligible_subroutines--;
+			}
+		}
+	}
+
+	printf("%zu after nest limit filter.\n", eligible_subroutines);
+	fflush(stdout);
+
+
+	///////////////////////////////////////////// PHASE 3: build the final compressed data
+	printf("Creating final compressed song data...");
+
+	compressed_song_data.data = malloc(all_song_data_length * sizeof(*compressed_song_data.data));
+	compressed_song_data.length = 0;
+	compressed_song_data.max = all_song_data_length;
+	size_t compressed_song_data_size = 0;
+
+	//// write main song data
+	int song_id = 0;
+	int cur_song_id = -1;
+	for (size_t i = 0; i < all_song_data_length; i++) {
+		if (song_id != cur_song_id) {
+			write_song_command(&compressed_song_data, SONG_CMD, song_id);
+			cur_song_id = song_id;
+		}
+
+		unsigned cmd = all_song_data[i].cmd;
+		unsigned param = all_song_data[i].param;
+		write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, cmd, param, &compressed_song_data_size, 0);
+
+		if (cmd == 0x6a)
+			song_id++;
+	}
+
+	//// write subroutines
+	for (size_t si = 0; si < seqs; si++) {
+		song_command_pair_dict_sequence_t * s = &seq_tbl[si];
+		size_t di = s->left;
+		if (s->minimum_eligible_index != SEQUENCE_NONE && s->call_level < CALL_NEST_LIMIT) {
+			// step until we hit the minimum eligible index
+			for (size_t i = 0; i < s->minimum_eligible_index; i++) {
+				di = dict_tbl[di].pair[1].param;
+			}
+
+			// write subroutine body
+			song_command_pair_dict_t * d = &dict_tbl[di];
+			while (1) {
+				if (d->sequence_call_count > 0) {
+					write_song_command(&compressed_song_data, LAB_CMD, di);
+				}
+
+				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, d->pair[0].cmd, d->pair[0].param, &compressed_song_data_size, 0);
+
+				if (di == s->right)
+					break;
+				di = d->pair[1].param;
+				d = &dict_tbl[di];
+			}
+			if (!write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, d->pair[1].cmd, d->pair[1].param, &compressed_song_data_size, 1))
+				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, 0x6a, 0, &compressed_song_data_size, 0);
+		}
+	}
+
+	////////// done, clean up
+	clock_t end_time = clock();
+	printf("Compressed %zu bytes of song data to %zu bytes in %.2f seconds. (%.2f%%)\n", songs_size, compressed_song_data_size, (double)(end_time-start_time)/CLOCKS_PER_SEC, (compressed_song_data_size*100.0) / songs_size);
+	songs_size = compressed_song_data_size;
+
+	free(all_song_data);
+	free(dict_tbl);
+	free(seq_tbl);
+}
+
+
+
+
+
+
+
 
 /****************** main function ***********************/
 
@@ -1081,6 +1752,8 @@ int main(int argc, char *argv[])
 		for (int i = 0; i < 75; i++) putchar('-');
 		putchar('\n');
 	}
+
+	compress_song_data(50000, 2);
 	
 	
 	/********* report ********************/
@@ -1139,8 +1812,8 @@ int main(int argc, char *argv[])
 		if (i < songs-1) fputc(',',f);
 	}
 	
-	/***** actual datas *****/
-	for (size_t i = 0; i < songs; i++)
+	/***** actual data *****/
+	/*for (size_t i = 0; i < songs; i++)
 	{
 		song_t *s = &song_tbl[i];
 		fprintf(f,"\nknl_song_%zu: db ",i);
@@ -1160,6 +1833,28 @@ int main(int argc, char *argv[])
 			if (j < s->length-1) {
 				fputc(',', f);
 				fputc(' ', f);
+			}
+		}
+	}*/
+	for (size_t i = 0; i < compressed_song_data.length; i++) {
+		const song_command_t * sc = &compressed_song_data.data[i];
+		if (sc->cmd == SONG_CMD) {
+			fprintf(f,"\nknl_song_%u:",sc->param);
+		} else if (sc->cmd == LAB_CMD) {
+			fprintf(f,"\nknl_lab_%u:",sc->param);
+		} else if (sc->cmd == 0x67) {
+			fprintf(f,"\n\tdl knl_lab_%u+$67000000",sc->param);
+		} else if (sc->cmd == 0x68) {
+			fprintf(f,"\n\tdl knl_lab_%u+$68000000",sc->param);
+		} else if (sc->cmd < 0x100) {
+			unsigned command_size = command_size_tbl[sc->cmd];
+			if (!command_size) {
+				printf("Illegal command %02X found at %zu\n", sc->cmd, i);
+				return EXIT_FAILURE;
+			}
+			fprintf(f,"\n\tdb $%02X",sc->cmd);
+			for (unsigned b = 1; b < command_size; b++) {
+				fprintf(f,",$%02X",(sc->param>>(8*(b-1)))&0xff);
 			}
 		}
 	}

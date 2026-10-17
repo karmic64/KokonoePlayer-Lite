@@ -22,6 +22,10 @@ banks 1
 .define PSG $7f11
 
 
+.define CALL_NEST_LIMIT 32
+.define STACK_POINTER $1ec0
+
+
 
 
 ;value is calculated so the timer overflows at 44100/BASE_INTERVAL hz
@@ -42,7 +46,6 @@ banks 1
 
 .enum 0
 ss_flags db ;(lower 4 bits are LFO)
-ss_ptr dsb 3
 ss_timer dw
 
 ss_fm_keyon dsb 6
@@ -60,16 +63,22 @@ ss_psg_pitch_hi dsb 3 ;only 3! noise doesn't need a high byte
 
 ss_sample_freq dw
 
-ss_size db
+ss_call_stack_index	db
+ss_call_stack dsb CALL_NEST_LIMIT*3
+
+ss_loop_restore	dsb 0	;song slot state is saved here on a loop command
 .ende
 
 
+.define ss_size ss_call_stack+3
+.define k_song_slots $0900
 
 
 
 
-;;;;;;;;;;;;;;;;; private variables
-.enum $0a00
+
+;;;;;;;;;;;;;;;;; private global variables
+.enum $1ec0
 k_temp dsb 4
 k_comm_index db
 
@@ -101,12 +110,6 @@ k_sample_accum db
 k_sample_ptr dsb 3
 k_sample_freq dw
 
-;;;;
-
-;note that we keep two copies of each song slot, one actively used and the other saved and restored on loop
-k_song_slots dsb ss_size*KNL_SONG_SLOTS
-k_song_slots_loop dsb ss_size*KNL_SONG_SLOTS
-
 .ende
 
 
@@ -114,8 +117,7 @@ k_song_slots_loop dsb ss_size*KNL_SONG_SLOTS
 
 ;;;;;;;;;;;;;;;; 68k-z80 communication variables
 
-.define STACK_POINTER $1ec0
-.enum STACK_POINTER
+.enum $1ef0
 comm_end_index db
 
 ;68k bus pointers
@@ -199,9 +201,13 @@ get_byte:
 	;sets bank to c
 set_bank:
 	push af
+	ld a,c
+@cur_bank:
+	cp 0
+	jr z,@skip
+	ld (@cur_bank+1),a
 	push hl
 	ld hl,BANK
-	ld a,c
 	ld (hl),a
 	rrca
 	ld (hl),a
@@ -219,6 +225,7 @@ set_bank:
 	ld (hl),a
 	ld (hl),0
 	pop hl
+@skip:
 	pop af
 	ret
 	
@@ -239,6 +246,7 @@ reset:
 	ld (hl),$df
 	;ld a,$ff
 	ld (hl),a
+
 	
 	
 	; ram has already been zeroed by the 68k, so only init nonzero ones
@@ -252,6 +260,12 @@ reset:
 	ld (k_prv_psg_noise),a
 	
 	
+	; reset bank
+	xor a
+	ld hl,BANK
+	.rept 9
+	ld (hl),a
+	.endr
 	
 	
 	
@@ -417,24 +431,22 @@ main_loop:
 	call indexed_read_68k_ptr
 	
 	ld (ix+ss_flags),$80
-	ld (ix+ss_ptr+0),l
-	ld (ix+ss_ptr+1),h
-	ld (ix+ss_ptr+2),c
+	ld (ix+ss_call_stack_index),ss_call_stack
+	ld (ix+ss_call_stack+0),l
+	ld (ix+ss_call_stack+1),h
+	ld (ix+ss_call_stack+2),c
 	
-	ld e,ixl
 	ld d,ixh
-	ld hl,ss_timer
-	add hl,de
-	ld b,ss_size-ss_timer
+	ld e,ss_timer
+	ld b,ss_call_stack_index-ss_timer
 	xor a
 -:
-	ld (hl),a
-	inc hl
+	ld (de),a
+	inc e
 	djnz -
 	
-	ld de,k_song_slots_loop-k_song_slots-ss_size
-	add hl,de
-	ld (hl),a
+	ld e,ss_loop_restore
+	ld (de),a
 	
 	;this song slot may already have occupied channels, so reset it to a regular state
 	call give_up_channels
@@ -475,7 +487,7 @@ main_loop:
 	push bc
 	call set_song_slot
 	
-	ld a,(ix+ss_ptr+1)
+	ld a,(ix+ss_call_stack_index)
 	or a
 	jr z,+
 	set SS_FLAG_ON,(ix+ss_flags)
@@ -527,7 +539,7 @@ play:
 	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; main song slot loop
 	
 	ld a,KNL_SONG_SLOTS-1
-	ld ix,k_song_slots+((KNL_SONG_SLOTS-1)*ss_size)
+	ld ix,k_song_slots+((KNL_SONG_SLOTS-1)*256)
 	
 @song_slot_loop:
 	ld (k_song_slot),a
@@ -550,9 +562,17 @@ play:
 	ld (k_sample_init_flag),a
 	
 @@vgm_data_read_again:
-	ld l,(ix+ss_ptr+0)
-	ld h,(ix+ss_ptr+1)
-	ld c,(ix+ss_ptr+2)
+	ld d,ixh
+	ld e,(ix+ss_call_stack_index)
+	ld a,(de)
+	ld l,a
+	inc e
+	ld a,(de)
+	ld h,a
+	inc e
+	ld a,(de)
+	ld c,a
+@@vgm_data_read_loop_bank:
 	rst set_bank
 	
 @@vgm_data_read_loop:
@@ -652,19 +672,23 @@ play:
 	ret
 	
 @@@@tbl:
-	.dw @@@@chn3_normal
-	.dw @@@@chn3_extd
-	.dw @@@@dac_disable
-	.dw @@@@dac_enable
+	.dw @@@@chn3
+	.dw @@@@dac
 	.dw @@@@lfo
 	.dw @@@@sample_freq
 	.dw @@@@sample_start
 	.dw @@@@sample_loop
 	.dw @@@@sample_stop
-	.dw @@@@wait
+	.dw @@@@jump
+	.dw @@@@call
 	.dw @@@@set_loop
-	.dw @@@@end
+	.dw @@@@return
+	.dw @@@@wait
 	
+@@@@chn3:
+	rst get_byte
+	or a
+	jr nz,@@@@chn3_extd
 @@@@chn3_normal:
 	res SS_FLAG_CHN3,(ix+ss_flags)
 	jp @@vgm_data_read_loop
@@ -672,6 +696,10 @@ play:
 	set SS_FLAG_CHN3,(ix+ss_flags)
 	jp @@vgm_data_read_loop
 	
+@@@@dac:
+	rst get_byte
+	or a
+	jr nz,@@@@dac_enable
 @@@@dac_disable:
 	res SS_FLAG_DAC,(ix+ss_flags)
 	jp @@vgm_data_read_loop
@@ -718,17 +746,63 @@ play:
 	rst get_byte
 	ld d,a
 	jp @@after_vgm_data_read
+
+@@@@jump:
+	rst get_byte
+	ld c,a
+	rst get_byte
+	ld d,a
+	rst get_byte
+	ld l,a
+	ld a,d
+	rlca
+	rl c
+	scf
+	rra
+	ld h,a
+	jp @@vgm_data_read_loop_bank
+
+@@@@call:
+	rst get_byte
+	ld b,a
+	rst get_byte
+	ld d,a
+	rst get_byte
+	ld e,a
+
+	push de
+	ld d,ixh
+	ld e,(ix+ss_call_stack_index)
+	ld a,l
+	ld (de),a
+	inc e
+	ld a,h
+	ld (de),a
+	inc e
+	ld a,c
+	ld (de),a
+	inc e
+	ld (ix+ss_call_stack_index),e
+	pop hl
+
+	ld a,b
+	sla h
+	rla
+	scf
+	rr h
+	ld c,a
+	jp @@vgm_data_read_loop_bank
 	
 @@@@set_loop:
-	ld (ix+ss_ptr+0),l
-	ld (ix+ss_ptr+1),h
-	ld (ix+ss_ptr+2),c
+	ld (ix+ss_call_stack+0),l	; loop command is invalid inside of subroutines so this is safe
+	ld (ix+ss_call_stack+1),h
+	ld (ix+ss_call_stack+2),c
 	
 	push hl
-	ld e,ixl
 	ld d,ixh
-	ld hl,k_song_slots_loop-k_song_slots
-	add hl,de
+	ld h,d
+	ld e,0
+	ld l,ss_loop_restore
 	
 	ld b,ss_size
 -:
@@ -743,12 +817,19 @@ play:
 	
 	jp @@vgm_data_read_loop
 	
-@@@@end:
+@@@@return:
+	ld a,(ix+ss_call_stack_index)
+	cp ss_call_stack
+	jr z,@@@@song_end
+	sub 3
+	ld (ix+ss_call_stack_index),a
+	jp @@vgm_data_read_again
 	
-	ld e,ixl
+@@@@song_end:
 	ld d,ixh
-	ld hl,k_song_slots_loop-k_song_slots
-	add hl,de
+	ld h,d
+	ld e,0
+	ld l,ss_loop_restore
 	
 	bit 7,(hl)
 	jr z,@@@@@stop
@@ -802,11 +883,10 @@ play:
 	jr c,@@@@@reset_loop
 	
 	
-	ld l,(ix+ss_ptr+0)
-	ld h,(ix+ss_ptr+1)
-	ld c,(ix+ss_ptr+2)
-	rst set_bank
-	jp @@vgm_data_read_loop
+	ld l,(ix+ss_call_stack+0)	; loop sets are not allowed inside subroutines so this is safe
+	ld h,(ix+ss_call_stack+1)
+	ld c,(ix+ss_call_stack+2)
+	jp @@vgm_data_read_loop_bank
 	
 	
 @@@@@stop:
@@ -1024,9 +1104,18 @@ play:
 @@after_vgm_data_read:
 	;amount of time for the next event is in DE
 	
-	ld (ix+ss_ptr+0),l
-	ld (ix+ss_ptr+1),h
-	ld (ix+ss_ptr+2),c
+	push de
+	ld d,ixh
+	ld e,(ix+ss_call_stack_index)
+	ld a,l
+	ld (de),a
+	inc e
+	ld a,h
+	ld (de),a
+	inc e
+	ld a,c
+	ld (de),a
+	pop de
 	
 	ld l,(ix+ss_timer+0)
 	ld h,(ix+ss_timer+1)
@@ -1148,8 +1237,7 @@ play:
 	;;;;;;;;;;;;;;;;;;;;;;;;;;;;; next song slot
 	
 @@next_song_slot:	
-	ld de,-ss_size
-	add ix,de
+	dec ixh
 	
 	ld a,(k_song_slot)
 	dec a
@@ -1375,7 +1463,7 @@ stop_song_slot:
 	call set_song_slot
 	
 stop_current_song_slot:
-	ld (ix+ss_ptr+1),0
+	ld (ix+ss_call_stack_index),0
 	
 	
 pause_current_song_slot:
@@ -1613,31 +1701,21 @@ read_68k_ptr:
 	;to A
 set_song_slot:
 	ld (k_song_slot),a
-	
-	rlca
-	ld e,a
-	ld d,0
-	ld hl,song_slot_ptr_tbl
-	add hl,de
-	
-	ld a,(hl)
-	ld ixl,a
-	inc hl
-	ld a,(hl)
+	add a,>k_song_slots
 	ld ixh,a
-	
+	ld ixl,0
 	ld (k_song_slot_ptr),ix
 	ret
 
 
 
-	;what do you think?
+	;song slots are page-aligned so no upper byte adjustment
 iy_equals_ix_plus_a:
 	add ixl
 	ld iyl,a
-	ld a,0
-	adc ixh
-	ld iyh,a
+	;ld a,0
+	;adc ixh
+	;ld iyh,a
 	ret
 
 
@@ -1651,14 +1729,6 @@ iy_equals_ix_plus_a:
 
 
 	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; data
-	
-	
-song_slot_ptr_tbl:
-	.redefine idx 0
-	.rept KNL_SONG_SLOTS
-		.dw ss_size*idx + k_song_slots
-		.redefine idx idx+1
-	.endr
 	
 	
 frame_timer_tbl:

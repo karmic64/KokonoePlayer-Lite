@@ -5,7 +5,7 @@ Z80RESET = $a11200
 
 
 
-	offset Z80+$1ec0
+	offset Z80+$1ef0
 z80_comm_index ds.b 1
 z80_base_pointers ds.b 3*3
 
@@ -17,7 +17,7 @@ z80_comm_buf = Z80+$1f00
 
 	section .text,code
 	
-	db "KokonoePlayer-Lite v0.95 coded by karmic"
+	db "KokonoePlayer-Lite v0.98 coded by karmic"
 	align 1
 	
 	
