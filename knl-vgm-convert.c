@@ -1104,139 +1104,224 @@ typedef struct {
 	size_t right;	// INSTANCE_NONE indicates this entry is no longer valid
 } song_command_pair_instance_t;
 
-typedef struct {
-	size_t pair_index;
-	size_t ii;
-} song_command_pair_instance_ptr_t;
-
-typedef struct {
+typedef struct song_command_pair {
 	song_command_t pair[2];
 	unsigned freq;	// actual amount of instances
 	song_command_pair_instance_t * instance_tbl;	// list of instances of this pair
 	size_t instances_max;	// allocated space for instances table
 	size_t instances_length;	// length of instances table, including null-entries
+
+	struct song_command_pair * prev;	// links within main hashmap
+	struct song_command_pair * next;
+
+	struct song_command_pair * prev_freq;	// links within frequency bucket map
+	struct song_command_pair * next_freq;
 } song_command_pair_t;
 
 typedef struct {
-	song_command_pair_t * pairs;	// the pair table itself
-	size_t length;
-	size_t max;
-	size_t first_free;
+	song_command_pair_t * pair;
+	size_t ii;
+} song_command_pair_instance_ptr_t;
 
-	size_t highest_pair;
+typedef struct {
+	song_command_pair_t ** pairs;	// linked-list hashmap of pairs
+
 	unsigned highest_pair_freq;
+	song_command_pair_t ** freq_map;	// array of linked lists, based on the frequency of the pairs
+	size_t freq_map_max;	// max freq value being tracked
 
 	song_command_pair_instance_ptr_t * left_instance_tbl;	// table that maps source data -> pairs
 	song_command_pair_instance_ptr_t * right_instance_tbl;	// table that maps source data -> pairs
 } song_command_pair_list_t;
 
-void remove_pair(song_command_pair_list_t * list, size_t pair_index) {
-	song_command_pair_t * p = &list->pairs[pair_index];
+unsigned hash_song_command(song_command_t * cmd) {
+	unsigned hash = 0;
 
-	p->instances_length = 0;
-	if (pair_index < list->first_free) {
-		list->first_free = pair_index;
+	hash ^= (cmd->cmd) & 0xffff;
+	hash ^= (cmd->param>>8) & 0xffff;
+	hash ^= (cmd->param<<8) & 0xff00;
+	hash ^= (cmd->cmd>>16) & 0xffff;
+	hash ^= (cmd->param>>24) & 0xff;
+
+	return hash;
+}
+
+unsigned hash_pair(song_command_t * left, song_command_t * right) {
+	unsigned hash = hash_song_command(left);
+
+	unsigned right_hash = hash_song_command(right);
+	hash ^= (right_hash>>8) & 0xff;
+	hash ^= (right_hash<<8) & 0xff00;
+
+	return hash;
+}
+
+void remove_pair(song_command_pair_list_t * list, song_command_pair_t * p) {
+	unsigned hash = hash_pair(&p->pair[0], &p->pair[1]);
+	song_command_pair_t * prev = p->prev;
+	song_command_pair_t * next = p->next;
+
+	free(p->instance_tbl);
+	free(p);
+
+	if (prev) {
+		prev->next = next;
+	} else {
+		list->pairs[hash] = next;
+	}
+	if (next) {
+		next->prev = prev;
 	}
 }
 
 void remove_pair_instance(song_command_pair_list_t * list, song_command_pair_instance_ptr_t * ip) {
-	size_t pair_index = ip->pair_index;
-	if (pair_index < list->length) {
-		song_command_pair_t * p = &list->pairs[pair_index];
+	song_command_pair_t * p = ip->pair;
+	if (p) {
 		if (ip->ii < p->instances_length) {
 			song_command_pair_instance_t * i = &p->instance_tbl[ip->ii];
 			if (i->left != INSTANCE_NONE && i->right != INSTANCE_NONE) {
-				list->left_instance_tbl[i->left].pair_index = INSTANCE_NONE;
-				list->right_instance_tbl[i->right].pair_index = INSTANCE_NONE;
+				// update instance table
+				list->left_instance_tbl[i->left].pair = NULL;
+				list->right_instance_tbl[i->right].pair = NULL;
 				i->left = INSTANCE_NONE;
 				i->right = INSTANCE_NONE;
+
+				// update frequency
+				song_command_pair_t * prev_freq = p->prev_freq;
+				song_command_pair_t * next_freq = p->next_freq;
+				p->prev_freq = NULL;
+				p->next_freq = NULL;
+				if (list->highest_pair_freq == p->freq && !prev_freq && !next_freq) {	// if this is the only entry for this freq and this is the max then decrease the max
+					list->highest_pair_freq--;
+				}
+				if (prev_freq) {	// take this out of the freq list
+					prev_freq->next_freq = next_freq;
+				} else {
+					list->freq_map[p->freq-1] = next_freq;
+				}
+				if (next_freq) {
+					next_freq->prev_freq = prev_freq;
+				}
+
 				p->freq--;
 				if (!p->freq) {
-					remove_pair(list, pair_index);
+					remove_pair(list, p);
+				} else {
+					song_command_pair_t * fp_freq = list->freq_map[p->freq-1];	// add this pair to the new freq list
+					if (fp_freq) {
+						fp_freq->prev_freq = p;
+						p->next_freq = fp_freq;
+					}
+					list->freq_map[p->freq-1] = p;
 				}
 			}
 		}
 	}
 }
 
-size_t add_pair_instance(song_command_pair_list_t * list, song_command_t * left, song_command_t * right, size_t left_i, size_t right_i) {
+song_command_pair_t * add_pair_instance(song_command_pair_list_t * list, song_command_t * left, song_command_t * right, size_t left_i, size_t right_i) {
 	// try finding an instance of this pair in the list already
-	size_t found_i = INSTANCE_NONE;
-	song_command_pair_t * p = NULL;
-	for (size_t i = 0; i < list->length; i++) {
-		p = &list->pairs[i];
+	unsigned hash = hash_pair(left, right);
+	song_command_pair_t * p = list->pairs[hash];
+	while (p) {
 		if (!memcmp(left, &p->pair[0], sizeof(song_command_t)) && !memcmp(right, &p->pair[1], sizeof(song_command_t))) {
-			found_i = i;
 			break;
 		}
+		p = p->next;
 	}
 
 	// if nothing was found then create a new pair, otherwise add this instance to the old pair
-	if (found_i == INSTANCE_NONE) {
-		found_i = list->first_free;
-		if (found_i == list->max) {
-			list->max *= 2;
-			list->pairs = realloc(list->pairs, list->max * sizeof(*list->pairs));
-		}
-		if (list->first_free++ == list->length) {
-			list->length++;
-		}
-
-		p = &list->pairs[found_i];
+	if (!p) {
+		p = malloc(sizeof(*p));
 		memcpy(&p->pair[0], left, sizeof(song_command_t));
 		memcpy(&p->pair[1], right, sizeof(song_command_t));
 		p->freq = 0;
+		p->prev_freq = NULL;
+		p->next_freq = NULL;
 		p->instance_tbl = malloc(0x10 * sizeof(*p->instance_tbl));
 		p->instances_length = 0;
 		p->instances_max = 0x10;
 
-		while (list->first_free < list->length && list->pairs[list->first_free].freq != 0) {
-			list->first_free++;
+		song_command_pair_t * fp = list->pairs[hash];
+		if (fp) {
+			fp->prev = p;
+			p->next = fp;
+		} else {
+			p->next = NULL;
 		}
+		p->prev = NULL;
+		list->pairs[hash] = p;
 	} else {
 		if (p->instances_length == p->instances_max) {
 			p->instances_max *= 2;
 			p->instance_tbl = realloc(p->instance_tbl, p->instances_max * sizeof(*p->instance_tbl));
 		}
 	}
+
+	// set up instance table
 	p->instance_tbl[p->instances_length].left = left_i;
 	p->instance_tbl[p->instances_length].right = right_i;
-	list->left_instance_tbl[left_i].pair_index = found_i;
-	list->right_instance_tbl[right_i].pair_index = found_i;
+	list->left_instance_tbl[left_i].pair = p;
+	list->right_instance_tbl[right_i].pair = p;
 	list->left_instance_tbl[left_i].ii = p->instances_length;
 	list->right_instance_tbl[right_i].ii = p->instances_length;
 	p->instances_length++;
-	p->freq++;
 
-	return found_i;
-}
+	// update frequency
+	if (p->freq) {	// take this pair out of the old link
+		song_command_pair_t * prev_freq = p->prev_freq;
+		song_command_pair_t * next_freq = p->next_freq;
+		p->prev_freq = NULL;
+		p->next_freq = NULL;
 
-void update_highest_pair(song_command_pair_list_t * list) {
-	list->highest_pair = -1;
-	list->highest_pair_freq = 0;
-	for (size_t pi = 0; pi < list->length; pi++) {
-		song_command_pair_t * p = &list->pairs[pi];
-		if (p->freq > list->highest_pair_freq) {
-			list->highest_pair_freq = p->freq;
-			list->highest_pair = pi;
+		if (prev_freq) {
+			prev_freq->next_freq = next_freq;
+		} else {
+			list->freq_map[p->freq-1] = next_freq;
+		}
+		if (next_freq) {
+			next_freq->prev_freq = prev_freq;
 		}
 	}
+
+	p->freq++;	// step the frequency value and assign the new highest if needed
+	if (p->freq > list->highest_pair_freq) {
+		list->highest_pair_freq = p->freq;
+	}
+
+	size_t old_freq_map_max = list->freq_map_max;	// if this freq is too high then expand the array
+	while (list->freq_map_max < p->freq) {
+		list->freq_map_max *= 2;
+	}
+	if (list->freq_map_max != old_freq_map_max) {
+		list->freq_map = realloc(list->freq_map, list->freq_map_max * sizeof(*list->freq_map));
+		memset(&list->freq_map[old_freq_map_max], 0, (list->freq_map_max-old_freq_map_max)*sizeof(*list->freq_map));
+	}
+
+	song_command_pair_t * fp_freq = list->freq_map[p->freq-1];	// add this pair to the new freq list
+	if (fp_freq) {
+		fp_freq->prev_freq = p;
+		p->next_freq = fp_freq;
+	}
+	list->freq_map[p->freq-1] = p;
+
+	return p;
 }
 
 void init_pair_list(song_command_pair_list_t * list, song_command_t * data, size_t length) {
 	// initialize data structure
-	list->pairs = malloc(length * sizeof(*list->pairs));
-	list->length = 0;
-	list->max = length;
-	list->first_free = 0;
+	list->pairs = malloc(0x10000 * sizeof(*list->pairs));
+	memset(list->pairs, 0, 0x10000 * sizeof(*list->pairs));
 
-	list->highest_pair = -1;
 	list->highest_pair_freq = 0;
+	list->freq_map = malloc(0x100 * sizeof(*list->freq_map));
+	list->freq_map_max = 0x100;
+	memset(list->freq_map, 0, 0x100 * sizeof(*list->freq_map));
 
 	list->left_instance_tbl = malloc(length * sizeof(*list->left_instance_tbl));
 	list->right_instance_tbl = malloc(length * sizeof(*list->right_instance_tbl));
-	memset(list->left_instance_tbl, -1, length * sizeof(*list->left_instance_tbl));
-	memset(list->right_instance_tbl, -1, length * sizeof(*list->right_instance_tbl));
+	memset(list->left_instance_tbl, 0, length * sizeof(*list->left_instance_tbl));
+	memset(list->right_instance_tbl, 0, length * sizeof(*list->right_instance_tbl));
 
 	// do the first pass through the input data
 	for (size_t index = 0; index < length-1; index++) {
@@ -1248,18 +1333,20 @@ void init_pair_list(song_command_pair_list_t * list, song_command_t * data, size
 		}
 
 		// otherwise add this pair to the list
-		size_t pair_index = add_pair_instance(list, &this[0], &this[1], index+0, index+1);
-		unsigned pair_freq = list->pairs[pair_index].freq;
-		if (pair_freq > list->highest_pair_freq) {
-			list->highest_pair_freq = pair_freq;
-			list->highest_pair = pair_index;
-		}
+		song_command_pair_t * pair = add_pair_instance(list, &this[0], &this[1], index+0, index+1);
 	}
 }
 
 void free_pair_list(song_command_pair_list_t * list) {
-	for (size_t i = 0; i < list->length; i++) {
-		free(list->pairs[i].instance_tbl);
+	free(list->freq_map);
+	for (size_t i = 0; i < 0x10000; i++) {
+		song_command_pair_t * p = list->pairs[i];
+		while (p) {
+			song_command_pair_t * next = p->next;
+			free(p->instance_tbl);
+			free(p);
+			p = next;
+		}
 	}
 	free(list->pairs);
 	free(list->left_instance_tbl);
@@ -1362,8 +1449,8 @@ void compress_song_data(int max_iterations, unsigned pair_freq_threshold) {
 
 	// begin main iteration loop of finding most common pair and replacing sequences
 	int iter = 0;
-	song_command_pair_dict_t * dict_tbl = malloc(0x20000 * sizeof(*dict_tbl));
-	size_t dict_max = 0x20000;
+	song_command_pair_dict_t * dict_tbl = malloc(0x10000 * sizeof(*dict_tbl));
+	size_t dict_max = 0x10000;
 	size_t dict_length = 0;
 	int fib[3] = {0,1,1};
 	while (iter < max_iterations && pair_list.highest_pair_freq >= pair_freq_threshold) {
@@ -1377,7 +1464,7 @@ void compress_song_data(int max_iterations, unsigned pair_freq_threshold) {
 			fib[2] = fib[0] + fib[1];
 		}
 
-		song_command_pair_t * p = &pair_list.pairs[pair_list.highest_pair];
+		song_command_pair_t * p = pair_list.freq_map[pair_list.highest_pair_freq-1];
 
 		// add the replaced pair to the dictionary
 		if (dict_length == dict_max) {
@@ -1408,7 +1495,8 @@ void compress_song_data(int max_iterations, unsigned pair_freq_threshold) {
 		this_dict->sequence_id = SEQUENCE_NONE;
 
 		// replace all instances of the pair with a single value and recalculate the pairs
-		for (size_t ii = 0; ii < p->instances_length; ii++) {
+		unsigned instances_left = p->freq;	// keep a separate counter, as the pointer is deleted when all instances are removed
+		for (size_t ii = 0; instances_left && ii < p->instances_length; ii++) {
 			song_command_pair_instance_t * i = &p->instance_tbl[ii];
 			size_t left = i->left;
 			size_t right = i->right;
@@ -1430,8 +1518,8 @@ void compress_song_data(int max_iterations, unsigned pair_freq_threshold) {
 
 				// update the pair relying on the left side we just replaced, if any
 				song_command_pair_instance_ptr_t * left_inst_ptr = &pair_list.right_instance_tbl[left];
-				if (left_inst_ptr->pair_index != INSTANCE_NONE) {
-					song_command_pair_t * left_pair = &pair_list.pairs[left_inst_ptr->pair_index];
+				if (left_inst_ptr->pair) {
+					song_command_pair_t * left_pair = left_inst_ptr->pair;
 					song_command_pair_instance_t * left_pair_i = &left_pair->instance_tbl[left_inst_ptr->ii];
 					size_t left_pair_left = left_pair_i->left;
 					remove_pair_instance(&pair_list, left_inst_ptr);
@@ -1443,13 +1531,12 @@ void compress_song_data(int max_iterations, unsigned pair_freq_threshold) {
 				if (new_right != INSTANCE_NONE) {
 					add_pair_instance(&pair_list, &all_song_data[left], &all_song_data[new_right], left, new_right);
 				}
+
+				instances_left--;
 			}
 		}
 
 		dict_length++;
-
-		// find the next most common pair
-		update_highest_pair(&pair_list);
 	}
 	if (pair_list.highest_pair_freq >= pair_freq_threshold) {
 		printf("hit %d-iteration limit.\n", iter);
