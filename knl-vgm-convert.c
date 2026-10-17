@@ -1090,12 +1090,10 @@ load_vgm_cleanup:
 #define CALL_CMD	((unsigned)-1)	// temporary cmd value used when building the pairs to denote a token id
 
 #define INSTANCE_NONE (~(size_t)0)
-
 #define SEQUENCE_NONE (~(size_t)0)
-#define SEQUENCE_INLINE (~(size_t)1)
 
 #define CALL_SIZE 4
-#define INLINE_THRESHOLD 5	// subroutines <= this size are never created
+#define INLINE_THRESHOLD 4	// subroutines <= this size are never created
 
 #define CALL_NEST_LIMIT 32
 
