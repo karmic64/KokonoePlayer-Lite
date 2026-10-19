@@ -13,72 +13,64 @@
 
 /*
 
-data stream format:
-
-CONTROL COMMANDS:
-	$67 $yyyyyy - jump
-	$68 $yyyyyy - call
-	$69 - set loop point
-	$6a - if in a call return, else loop if there is a loop, otherwise stop
-	$6b $yyyy - wait for $yyyy 44100hz intervals
-	$c0-$df - wait for $xx 60hz intervals
-	$e0-$ff - wait for $xx 50hz intervals
-
-PSG COMMANDS:
-	$6c-$6f $xx - psg low frequency to $xx (or noise mode/pitch on PSG)
-	$70-$7f - psg high frequency (bits 2-3 are channel, bits 0-1 are the actual bits (or noise pitch on PSG)
-	$80-$bf - psg channel volume (channel in upper nybble, volume in lower nybble)
-
-FM COMMANDS:
-	$00-$5f - fm channel control (upper nybble is channel id)
-		$x0 - keyoff all operators
-		$x1 - keyon all operators
-		$x2 $yy - set keyon state to $yy
-		$x3 $yy - set FM patch to $yy
-		$x4 $yyyy - set FM patch to $yyyy
-		$x5 $yy - set low frequency to $yy
-		$x6 $yy - set high frequency to $yy
-		$x7 $yyyy - set frequency to $yyyy
-	$00-$2f - chn3 operator control (upper nybble is operator id - 1)
-		$x8 $yy - set low frequency to $yy
-		$x9 $yy - set high frequency to $yy
-		$xa $yyyy - set frequency to $yyyy
-	$60 $yy - set chn.3 mode (0=normal, 1=extd)
-	$61 $yy - toggle DAC
-	$62 $yy - set LFO to $yy
-	$63 $yyyy - set sample output frequency to $yyyy
-	$64 $yy - start sample $yy
-	$65 $yy - start looped sample $yy
-	$66 - stop sample
+data stream format (per-channel):
+	$00-$7f: wait $xx base intervals
+	$80-$9f $yy: set fm patch parameter $xx to $yy
+	$a0-$df: add to pitch (base $c0)
+	$e0-$ef: set psg volume/fm op keyon state
+	$f0 $yyyy: set pitch
+	$f1 $yy: set low pitch
+	$f2 $yy: set high pitch
+	$f3: chn.3 normal/dac off
+	$f4: chn.3 extd/dac on
+	$f5 $yy: set lfo
+	$f6-$f8 $yyyy: set chn.3 op pitch
+	$f9 $yyyy: set sample output frequency
+	$fa $yy: start sample
+	$fb $yy: start looped sample
+	$fc: stop sample
+	$fd $yyyyyy: jump
+	$fe $yyyyyy: call
+	$ff: return from call, or stop if not in call
 
 */
 
 const unsigned char command_size_tbl[0x100] = {
-	// 00-5f fm control
-	1,1,2,2,3,2,2,3,2,2,3,0,0,0,0,0,
-	1,1,2,2,3,2,2,3,2,2,3,0,0,0,0,0,
-	1,1,2,2,3,2,2,3,2,2,3,0,0,0,0,0,
-	1,1,2,2,3,2,2,3,0,0,0,0,0,0,0,0,
-	1,1,2,2,3,2,2,3,0,0,0,0,0,0,0,0,
-	1,1,2,2,3,2,2,3,0,0,0,0,0,0,0,0,
-	// 60-6f control and psg low-freq
-	2,2,2,3,2,2,1,4,4,1,1,3,2,2,2,2,
-	// 70-bf psg main
+	// 00-7f waits
 	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
 	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
 	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
 	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
 	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
-	// c0-ff short waits
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	// 80-9f fm patch
+	2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+	2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+	// a0-df add to pitch
 	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
 	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
 	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
 	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	// e0-ef volume
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	// f0-ff control
+	3,2,2,1,1,2,3,3,3,3,2,2,1,4,4,1,
 };
 
 
 
 #define min(a,b) (((a) < (b)) ? (a) : (b))
+
+#define CHANNELS 10
+#define FM_CHANNELS 6
+#define PSG_CHANNELS 4
+#define FIRST_FM_CHANNEL 0
+#define FIRST_PSG_CHANNEL 6
+#define FM_CHN3 2
+#define FM_DAC_CHANNEL 5
+#define PSG_NOISE_CHANNEL 9
 
 /* see vgm spec */
 #define NTSC_INTERVAL 735
@@ -92,12 +84,9 @@ const unsigned char command_size_tbl[0x100] = {
 
 /* indexed_read_68k_ptr accepts a 16-bit id, and shifts out the upper 2 bits */
 #define MAX_SONGS 0x4000
-#define MAX_FM_PATCHES 0x4000
 
 /* k_sample_init_id is 1 byte long (this could be trivially fixed if a need ever arises */
 #define MAX_SAMPLES 0x100
-
-
 
 
 unsigned get16(uint8_t *p) { return (*(p+0)) | (*(p+1)<<8); }
@@ -111,37 +100,38 @@ unsigned get32(uint8_t *p) { return (*(p+0)) | (*(p+1)<<8) | (*(p+2)<<16) | (*(p
 /////// fm patch
 
 typedef struct {
-	uint8_t reg30[4];
-	uint8_t reg40[4];
-	uint8_t reg50[4];
-	uint8_t reg60[4];
-	uint8_t reg70[4];
-	uint8_t reg80[4];
-	uint8_t reg90[4];
-	uint8_t regb0;
-	uint8_t regb4;
+	short reg30[4];
+	short reg40[4];
+	short reg50[4];
+	short reg60[4];
+	short reg70[4];
+	short reg80[4];
+	short reg90[4];
+	short regb0;
+	short regb4;
 }	fm_patch_t;
-void init_fm_patch(fm_patch_t *p)
-{
-	memset(p,0,sizeof(*p));
-	/* set up panning */
-	p->regb4 = 0xc0;
-}
-int fm_patch_cmp(fm_patch_t *a, fm_patch_t *b)
-{
-	if (memcmp(a->reg30,b->reg30,4)) return 1;
-	if (memcmp(a->reg40,b->reg40,4)) return 1;
-	if (memcmp(a->reg50,b->reg50,4)) return 1;
-	if (memcmp(a->reg60,b->reg60,4)) return 1;
-	if (memcmp(a->reg70,b->reg70,4)) return 1;
-	if (memcmp(a->reg80,b->reg80,4)) return 1;
-	if (memcmp(a->reg90,b->reg90,4)) return 1;
-	if (a->regb0 != b->regb0) return 1;
-	if (a->regb4 != b->regb4) return 1;
+
+int fm_patch_is_audible(const fm_patch_t * fm) {
+	for (int i = 0; i < 4; i++) {
+		if (fm->reg40[i] != 0x7f)
+			return 1;
+	}
 	return 0;
 }
 
-unsigned add_fm_patch(fm_patch_t *);	// forward-declare add function
+int fm_patch_uses_lfo(const fm_patch_t * fm) {
+	if (!fm_patch_is_audible(fm))
+		return 0;
+
+	if (fm->regb4 & 0x07) return 1;	// PMS is on
+	if (!(fm->regb4 & 0x30)) return 0;	// AMS is off
+	for (int i = 0; i < 4; i++) {	// an operator uses AM
+		if ((fm->reg40[i] != 0x7f) && (fm->reg60[i] & 0x80))
+			return 1;
+	}
+
+	return 0;
+}
 
 
 ////////////// sample
@@ -150,11 +140,13 @@ typedef struct {
 	uint8_t * data;
 	size_t size;
 }	sample_t;
+
 int sample_data_cmp(sample_t *to_add, sample_t *compared)
 {
 	if (to_add->size > compared->size) return 1;
 	return memcmp(to_add->data, compared->data, to_add->size);
 }
+
 int sample_cmp(sample_t *a, sample_t *b)
 {
 	if (a->size != b->size) return 1;
@@ -165,253 +157,239 @@ unsigned add_sample(sample_t *);	// forward-declare add function
 
 
 
+/////// playback state
+
+typedef struct {
+	short lo;
+	short hi;
+} lo_hi_t;
+
+typedef struct {
+	fm_patch_t patch;
+	lo_hi_t freq;
+	int8_t keyon;
+} fm_channel_state_t;
+
+typedef struct {
+	fm_channel_state_t chn[FM_CHANNELS];
+	int16_t extd_freq[3];
+	int8_t chn3_mode;
+	int8_t dac_enable;
+	int8_t lfo;
+} fm_state_t;
+
+typedef struct {
+	lo_hi_t freq;
+	int8_t volume;
+} psg_channel_state_t;
+
+typedef struct {
+	psg_channel_state_t chn[PSG_CHANNELS];
+} psg_state_t;
+
+typedef struct {
+	fm_state_t fm;
+	psg_state_t psg;
+
+	int queued_wait[CHANNELS];
+	int sample_freq;
+	// lfo affects all channels, but our datastream is per-channel.
+	// so we need to be able to "log" the write until we find an enabled
+	// channel using the lfo, where we will put the lfo enable command
+	int8_t queued_lfo;
+} playback_state_t;
+
+void init_playback_state(playback_state_t *p)
+{
+	memset(p, -1, sizeof(*p));
+	memset(p->queued_wait, 0, sizeof(p->queued_wait));
+}
+
+void reset_playback_state(playback_state_t *p) {	// used on loop to disable the same-value-rewrite detection
+	memset(&p->fm, -1, sizeof(p->fm));
+	memset(&p->psg, -1, sizeof(p->psg));
+	p->sample_freq = -1;
+}
+
+
+
 /////////// song
+
+// temporary command values
+#define LOOP_CMD	((unsigned)-5)	// defines song loop point in the uncompressed datastream
+#define END_CMD	((unsigned)-4)	// defines end of a song in the uncompressed datastream
+#define LAB_CMD	((unsigned)-3)	// used to define label numbers in the compressed datastream
+#define NOP_CMD ((unsigned)-2)	// used to hold "holes" in the datastream
+#define CALL_CMD	((unsigned)-1)	// used when building the pairs to denote a token id
+
+// flags for the sequences_used member
+#define FM_USED_KEYON (1<<0)	// was keyed on
+#define FM_USED_NZ_FREQ (1<<1)	// channel set to nonzero freq
+#define FM_USED_NZ_TL (1<<2)	// channel operator TL was set to nonzero (actually non-$7f)
+#define FM_USED 0x07
+
+#define PSG_USED_NZ_VOL (1<<0)	// volume was set to nonzero (actually non-$0f)
+#define PSG_USED_NZ_FREQ (1<<1)	// period was set to nonzero
+#define PSG_USED 0x03
 
 typedef struct {	// this struct should always be memset before use to allow safe memcmp'ing
 	unsigned cmd;
 	unsigned param;
 } song_command_t;
+
 typedef struct {
 	song_command_t * data;
 	size_t length;
 	size_t max;	// current allocated length of data array
 } song_command_sequence_t;
-typedef song_command_sequence_t song_t;
-int song_cmp(song_t *a, song_t *b)
+
+typedef struct {
+	song_command_sequence_t sequences[CHANNELS];
+	int sequences_used[CHANNELS];	// these hold flags that indicate if the sequence should be written
+
+	int base_interval;
+
+	int has_loop;
+	size_t sequence_label_ids[CHANNELS];
+	size_t sequence_loop_label_ids[CHANNELS];
+} song_t;
+
+void init_song(song_t * song, int base_interval) {
+	memset(song, 0, sizeof(*song));
+	for (int i = 0; i < CHANNELS; i++) {
+		song->sequences[i].data = malloc(0x1000 * sizeof(*song->sequences[i].data));
+		song->sequences[i].max = 0x1000;
+	}
+
+	song->base_interval = base_interval;
+
+	memset(song->sequence_label_ids, -1, sizeof(song->sequence_label_ids));
+	memset(song->sequence_loop_label_ids, -1, sizeof(song->sequence_loop_label_ids));
+
+	song->sequences_used[PSG_NOISE_CHANNEL] = PSG_USED_NZ_FREQ;	// because no freq is inaudible on this channel
+}
+
+void free_song_command_sequence(song_command_sequence_t * seq) {
+	free(seq->data);
+	seq->data = NULL;
+	seq->length = 0;
+	seq->max = 0;
+}
+
+void free_song(song_t * song) {
+	for (int i = 0; i < CHANNELS; i++) {
+		free_song_command_sequence(&song->sequences[i]);
+		song->sequences_used[i] = 0;
+	}
+}
+
+int song_command_sequence_cmp(song_command_sequence_t *a, song_command_sequence_t *b)
 {
 	if (a->length != b->length) return 1;
 	return memcmp(a->data, b->data, a->length * sizeof(song_command_t));
 }
-void write_song_command(song_t * song, unsigned cmd, unsigned param) {
-	if (song->length == song->max) {
-		size_t old_song_max = song->max;
-		if (!song->max) song->max = 0x20000;
-		else song->max *= 2;
-		song->data = realloc(song->data,song->max*sizeof(*song->data));
-		memset(&song->data[old_song_max], 0, (song->max-old_song_max)*sizeof(*song->data));
+
+int song_cmp(song_t * a, song_t * b) {
+	// not implemented.....
+	return 1;
+}
+
+void write_song_command(song_command_sequence_t * seq, unsigned cmd, unsigned param) {
+	if (seq->length == seq->max) {
+		size_t old_seq_max = seq->max;
+		if (!seq->max) seq->max = 0x20000;
+		else seq->max *= 2;
+		seq->data = realloc(seq->data,seq->max*sizeof(*seq->data));
+		memset(&seq->data[old_seq_max], 0, (seq->max-old_seq_max)*sizeof(*seq->data));
 	}
-	song_command_t * sc = &song->data[song->length++];
+	song_command_t * sc = &seq->data[seq->length++];
 	sc->cmd = cmd;
 	sc->param = param;
+}
+
+int song_channel_is_used(const song_t * s, int chn) {
+	return s->sequences_used[chn] == (chn < FIRST_PSG_CHANNEL ? FM_USED : PSG_USED);
+};
+
+void flush_queued_wait(song_t * s, playback_state_t * state, int chn) {
+	int waits = 0;
+	while (state->queued_wait[chn] >= s->base_interval) {
+		waits++;
+		state->queued_wait[chn] -= s->base_interval;
+	}
+
+	while (waits) {
+		int this_wait = min(waits, 0x80);
+		write_song_command(&s->sequences[chn], (waits-1), 0);
+		waits -= this_wait;
+	}
+}
+
+void queue_wait(playback_state_t * state, int wait) {
+	for (int i = 0; i < CHANNELS; i++) {
+		state->queued_wait[i] += wait;
+	}
+}
+
+void write_song_chn_command(song_t * song, playback_state_t * state, int chn, unsigned cmd, unsigned param) {
+	flush_queued_wait(song, state, chn);
+	write_song_command(&song->sequences[chn], cmd, param);
+}
+
+void write_song_chn_pitch_change(song_t * song, playback_state_t * state, int chn, int lo, int hi) {
+	if (lo < 0 && hi < 0) {	// filter out totally unknown new pitch
+		return;
+	}
+
+	lo_hi_t * prv = chn < FIRST_PSG_CHANNEL ? &state->fm.chn[chn-FIRST_FM_CHANNEL].freq : &state->psg.chn[chn-FIRST_PSG_CHANNEL].freq;
+	int prv_lo_known = prv->lo >= 0;
+	int prv_hi_known = prv->hi >= 0;
+	int prv_known = prv_lo_known && prv_hi_known;
+	int new_lo_known = lo >= 0;
+	int new_hi_known = hi >= 0;
+	int new_known = (prv_lo_known || new_lo_known) && (prv_hi_known || new_hi_known);
+	int lo_changed = new_lo_known && prv->lo != lo;
+	int hi_changed = new_hi_known && prv->hi != hi;
+
+	int prv_comb = prv_known ? (prv->lo | (prv->hi<<8)) : -1;
+	int comb = new_known
+		? (new_lo_known ? lo : prv->lo) | ((new_hi_known ? hi : prv->hi)<<8)
+		: -1;
+	if (comb > 0) {
+		song->sequences_used[chn] |= (chn < FIRST_PSG_CHANNEL ? FM_USED_NZ_FREQ : PSG_USED_NZ_FREQ);
+	}
+
+	int diff = prv_known && new_known ? comb - prv_comb : INT_MAX;
+	int lo_diff = prv_lo_known && new_lo_known && !hi_changed ? lo - prv->lo : INT_MAX;
+
+	if (diff > -0x20 && diff < 0x20) {
+		if (diff) {
+			write_song_chn_command(song, state, chn, 0xc0 + diff, 0);
+			prv->lo = lo;
+			prv->hi = hi;
+		}
+	} else if (lo_diff > -0x20 && lo_diff < 0x20) {
+		if (lo_diff) {
+			write_song_chn_command(song, state, chn, 0xc0 + lo_diff, 0);
+			prv->lo = lo;
+		}
+	} else if (lo_changed && hi_changed) {
+		write_song_chn_command(song, state, chn, 0xf0, comb);
+		prv->lo = lo;
+		prv->hi = hi;
+	} else if (lo_changed) {
+		write_song_chn_command(song, state, chn, 0xf1, lo);
+		prv->lo = lo;
+	} else if (hi_changed) {
+		write_song_chn_command(song, state, chn, 0xf2, hi);
+		prv->hi = hi;
+	}
 }
 
 unsigned add_song(song_t *);	// forward-declare add function
 
 
 
-/////// playback state
-
-typedef struct {
-	fm_patch_t patch[6];
-	uint16_t freq[6];
-	uint16_t extd_freq[3];
-	uint8_t keyon[6];
-	
-	uint8_t chn3_mode;
-	uint8_t dac_enable;
-	uint8_t lfo;
-} fm_state_t;
-typedef struct {
-	uint16_t freq[4];
-	uint8_t volume[4];
-} psg_state_t;
-typedef struct {
-	fm_state_t fm;
-	psg_state_t psg;
-	
-	uint16_t sample_freq;
-} playback_state_t;
-void init_playback_state(playback_state_t *p)
-{
-	memset(p, 0, sizeof(*p));
-	for (int i = 0; i < 6; i++)
-		init_fm_patch(&p->fm.patch[i]);
-}
-
-
-/* flushes fm patches if any of them changed */
-void flush_fm_patches(song_t * song, playback_state_t * prv, playback_state_t * state)
-{
-	for (int chn = 0; chn < 6; chn++)
-	{
-		fm_patch_t *old = &prv->fm.patch[chn];
-		fm_patch_t *new = &state->fm.patch[chn];
-		if (!fm_patch_cmp(old,new)) continue;
-
-		unsigned new_id = add_fm_patch(new);
-		memcpy(old, new, sizeof(*new));
-
-		write_song_command(song, 3 + (chn << 4) + (new_id < 0x100 ? 0 : 1), new_id);
-	}
-}
-
-/* flushes fm freqs if any of them changed */
-void flush_fm_freqs(song_t * song, playback_state_t * prv, playback_state_t * state)
-{
-	/******** normal fm channels *********/
-	for (int chn = 0; chn < 6; chn++)
-	{
-		uint16_t *old = &prv->fm.freq[chn];
-		uint16_t *new = &state->fm.freq[chn];
-
-		int lodiff = ((*old)&0xff) != ((*new)&0xff);
-		int hidiff = ((*old)>>8) != ((*new)>>8);
-
-		if (lodiff && hidiff)
-		{
-			write_song_command(song, (chn<<4) + 7, *new);
-		}
-		else if (lodiff)
-		{
-			write_song_command(song, (chn<<4) + 5, (*new)&0xff);
-		}
-		else if (hidiff)
-		{
-			write_song_command(song, (chn<<4) + 6, (*new)>>8);
-		}
-
-		*old = *new;
-	}
-
-	/********* ext.chn3 frequencies *************/
-	for (int op = 0; op < 3; op++)
-	{
-		uint16_t *old = &prv->fm.extd_freq[op];
-		uint16_t *new = &state->fm.extd_freq[op];
-
-		int lodiff = ((*old)&0xff) != ((*new)&0xff);
-		int hidiff = ((*old)>>8) != ((*new)>>8);
-
-		if (lodiff && hidiff)
-		{
-			write_song_command(song, (op<<4) + 10, *new);
-		}
-		else if (lodiff)
-		{
-			write_song_command(song, (op<<4) + 8, (*new)&0xff);
-		}
-		else if (hidiff)
-		{
-			write_song_command(song, (op<<4) + 9, (*new)>>8);
-		}
-
-		*old = *new;
-	}
-}
-
-/* flushes FM patches, freqs, and keyon state */
-void flush_fm_keyon_state(song_t * song, playback_state_t * prv, playback_state_t * state)
-{
-	flush_fm_patches(song, prv, state);
-	flush_fm_freqs(song, prv, state);
-
-	for (int chn = 0; chn < 6; chn++)
-	{
-		uint8_t *old = &prv->fm.keyon[chn];
-		uint8_t *new = &state->fm.keyon[chn];
-
-		if (*old != *new)
-		{
-			*old = *new;
-			if (*new == 0x00)
-				write_song_command(song, (chn<<4) + 0, 0);
-			else if (*new == 0xf0)
-				write_song_command(song, (chn<<4) + 1, 0);
-			else
-			{
-				write_song_command(song, (chn<<4) + 2, *new);
-			}
-		}
-	}
-}
-
-/* fully flush fm state */
-void flush_fm_state(song_t * song, playback_state_t * prv, playback_state_t * state)
-{
-	flush_fm_keyon_state(song, prv, state);
-
-	if (prv->fm.chn3_mode != state->fm.chn3_mode)
-	{
-		prv->fm.chn3_mode = state->fm.chn3_mode;
-
-		write_song_command(song, 0x60, (state->fm.chn3_mode ? 1 : 0));
-	}
-
-	if (prv->fm.dac_enable != state->fm.dac_enable)
-	{
-		prv->fm.dac_enable = state->fm.dac_enable;
-
-		write_song_command(song, 0x61, (state->fm.dac_enable ? 1 : 0));
-	}
-
-	if (prv->fm.lfo != state->fm.lfo)
-	{
-		prv->fm.lfo = state->fm.lfo;
-
-		write_song_command(song, 0x62, state->fm.lfo);
-	}
-}
-
-/* fully flush psg state */
-void flush_psg_state(song_t * song, playback_state_t * prv, playback_state_t * state)
-{
-	for (int chn = 0; chn < 4; chn++)
-	{
-		/* volume */
-		uint8_t *v = &state->psg.volume[chn];
-		uint8_t *pv = &prv->psg.volume[chn];
-		if (*v != *pv)
-		{
-			*pv = *v;
-			write_song_command(song, 0x80 + (chn<<4) + *v, 0);
-		}
-
-		/* freq */
-		uint16_t *f = &state->psg.freq[chn];
-		uint8_t fl = (*f) & 0xff;
-		uint8_t fh = (*f) >> 8;
-		uint16_t *pf = &prv->psg.freq[chn];
-		uint8_t pfl = (*pf) & 0xff;
-		uint8_t pfh = (*pf) >> 8;
-		if (chn != 3)
-		{
-			if (*pf == (uint16_t)-1 || fl != pfl)
-			{
-				write_song_command(song, 0x6c + chn, fl);
-			}
-			if (*pf == (uint16_t)-1 || fh != pfh)
-			{
-				write_song_command(song, 0x70 + (chn<<2) + fh, 0);
-			}
-		}
-		else
-		{
-			if (((*pf)&4) != ((*f)&4))
-			{ /* noise mode change */
-				write_song_command(song, 0x6f, fl);
-			}
-			else if (((*pf)&3) != ((*f)&3))
-			{ /* only noise pitch change */
-				write_song_command(song, 0x70 + (chn<<2) + (fl&3), 0);
-			}
-		}
-		*pf = *f;
-	}
-}
-
-/* fully flush all state (used on wait commands/loop/end) */
-void flush_playback_state(song_t * song, playback_state_t * prv, playback_state_t * state)
-{
-	flush_fm_state(song, prv, state);
-	flush_psg_state(song, prv, state);
-
-	if (prv->sample_freq != state->sample_freq)
-	{
-		prv->sample_freq = state->sample_freq;
-
-		write_song_command(song, 0x63, state->sample_freq);
-	}
-}
 
 
 
@@ -422,6 +400,7 @@ typedef struct {
 	unsigned id;
 	size_t count;
 } histogram_ent_t;
+
 int histogram_ent_cmp_desc(const void * a, const void * b)
 {
 	size_t ca = ((const histogram_ent_t*)a)->count;
@@ -434,10 +413,6 @@ int histogram_ent_cmp_desc(const void * a, const void * b)
 
 
 /***************** storage *******************/
-
-fm_patch_t *fm_patch_tbl = NULL;
-size_t fm_patches = 0;
-size_t fm_patches_max = 0;
 
 sample_t *sample_tbl = NULL;
 size_t samples = 0;
@@ -469,50 +444,10 @@ unsigned func_name(type_name *p) { \
 	return counter++; \
 }
 
-MAKE_ADD_FUNC(add_fm_patch, fm_patch_t, fm_patch_tbl, fm_patches, fm_patches_max, 0x100, fm_patch_cmp)
 MAKE_ADD_FUNC(add_sample, sample_t, sample_tbl, samples, samples_max, 0x20, sample_cmp)
 MAKE_ADD_FUNC(add_song, song_t, song_tbl, songs, songs_max, 0x20, song_cmp)
 
 #undef MAKE_ADD_FUNC
-
-
-
-
-/******************** misc funcs ********************/
-
-/* any register involved in the fm_patch_t */
-int is_fm_patch_register(unsigned part, unsigned r)
-{
-	/* alg/pan registers */
-	if (r >= 0xb0 && r <= 0xb2) return 1;
-	if (r >= 0xb4 && r <= 0xb6) return 1;
-	
-	/* outside of per-op regs? */
-	if (r < 0x30) return 0;
-	if (r >= 0xa0) return 0;
-	
-	/* channel 3 in a part does not exist */
-	return (r & 3) != 3;
-}
-
-/* if a register is not valid, writes will be ignored */
-int is_valid_fm_register(unsigned part, unsigned r)
-{
-	if (is_fm_patch_register(part,r)) return 1;
-	
-	/* frequencies */
-	if (r >= 0xa0 && r < 0xb0)
-		return (r & 3) != 3;
-	
-	/* following registers only exist in part 1 */
-	if (part) return 0;
-	if (r == 0x22) return 1; /* LFO */
-	if (r == 0x27) return 1; /* extd. chn.3 */
-	if (r == 0x28) return 1; /* keyon */
-	if (r == 0x2b) return 1; /* DAC enable */
-	
-	return 0;
-}
 
 
 
@@ -523,74 +458,89 @@ int is_valid_fm_register(unsigned part, unsigned r)
 
 /************************* main load_vgm function *************************/
 
-int load_vgm(char * vgm_filename)
+#define GET_VGM_BYTE(var) \
+	int var = fgetc(vgm_f); \
+	if (var == EOF) { \
+		goto vgm_read_error; \
+	}
+
+int load_vgm(char * vgm_filename, int base_interval)
 {
 	int return_val = 1;
 	
 	
 	/********** save old data counts for fail cleanup *************/
-	size_t old_fm_patches = fm_patches;
 	size_t old_samples = samples;
 	size_t old_songs = songs;
 	size_t old_samples_size = samples_size;
+	size_t old_songs_size = songs_size;
 	
 	
-	/******** init variables **********/
+	/******** variables **********/
 	struct stat vgm_stat;
-	uint8_t *vgm = NULL;
-	
+	FILE * vgm_f = NULL;
 	song_t song;
-	song.data = NULL;
+
+	int active_stream_id = -1; /* the stream that last started a sample */
+	uint8_t stream_active_flags[0x100/8];
+	uint8_t stream_bank_tbl[0x100];
+	uint8_t stream_step_tbl[0x100];
+	uint8_t stream_base_tbl[0x100];
+	uint16_t stream_freq_tbl[0x100];
+	memset(&stream_active_flags,0,sizeof(stream_active_flags));
+	memset(&stream_bank_tbl,0,sizeof(stream_bank_tbl));
+	memset(&stream_step_tbl,0,sizeof(stream_step_tbl));
+	memset(&stream_base_tbl,0,sizeof(stream_base_tbl));
+	memset(&stream_freq_tbl,0,sizeof(stream_freq_tbl));
+
+	unsigned stream_data_blocks = 0;
+	uint8_t *stream_data_block_tbl[0x100];
+	unsigned stream_data_block_sizes[0x100];
+	memset(&stream_data_block_tbl, 0, sizeof(stream_data_block_tbl));
+	memset(&stream_data_block_sizes, 0, sizeof(stream_data_block_sizes));
 	
 	
 	/************************** try opening the file **********************/
 	printf("Reading %s...",vgm_filename);
 	
-	if (stat(vgm_filename, &vgm_stat))
-	{
+	if (stat(vgm_filename, &vgm_stat)) {
 		printf("can't stat: %s\n", strerror(errno));
 		goto load_vgm_fail;
 	}
-	size_t vgm_size = vgm_stat.st_size;
-	vgm = malloc(vgm_size);
-	if (!vgm)
-	{
-		puts("can't allocate memory");
-		goto load_vgm_fail;
-	}
-	FILE *vgm_f = fopen(vgm_filename,"rb");
+	off_t vgm_size = vgm_stat.st_size;
+
+	unsigned char vgm_header[0x40];
+	vgm_f = fopen(vgm_filename,"rb");
 	if (!vgm_f)
 	{
 		printf("can't open: %s\n", strerror(errno));
 		goto load_vgm_fail;
 	}
-	size_t vgm_read = fread(vgm,1,vgm_size,vgm_f);
-	int vgm_read_err = errno;
-	fclose(vgm_f);
-	if (vgm_read != vgm_size)
+	size_t vgm_header_read = fread(vgm_header,1,0x40,vgm_f);
+	if (vgm_header_read != 0x40)
 	{
-		printf("read error: %s\n", strerror(vgm_read_err));
+		printf("header read error: %s\n", strerror(errno));
 		goto load_vgm_fail;
 	}
 	
 	
 	
 	/********* check file validity ******************/
-	if (memcmp(vgm,"Vgm ",4))
+	if (memcmp(vgm_header,"Vgm ",4))
 	{
 		puts("not a vgm");
 		goto load_vgm_fail;
 	}
-	unsigned vgm_reported_size = get32(vgm+4)+4;
+	unsigned vgm_reported_size = get32(vgm_header+4)+4;
 	if (vgm_reported_size != vgm_size)
 	{
 		printf("bad vgm size (%zu bytes, should be %u)", vgm_size, vgm_reported_size);
 		goto load_vgm_fail;
 	}
-	unsigned vgm_version = get32(vgm+8);
-	unsigned vgm_loop_offset = get32(vgm+0x1c);
+	unsigned vgm_version = get32(vgm_header+8);
+	unsigned vgm_loop_offset = get32(vgm_header+0x1c);
 	if (vgm_loop_offset) vgm_loop_offset += 0x1c;
-	unsigned vgm_data_offset = vgm_version < 0x150 ? 0x40 : get32(vgm+0x34)+0x34;
+	unsigned vgm_data_offset = vgm_version < 0x150 ? 0x40 : get32(vgm_header+0x34)+0x34;
 	if (vgm_data_offset >= vgm_size)
 	{
 		puts("bad data offset");
@@ -606,147 +556,153 @@ int load_vgm(char * vgm_filename)
 	
 	
 	/*********************** read the vgm datastream ***************************/
-	uint8_t *vp = vgm+vgm_data_offset;
-	uint8_t *vlp = vgm_loop_offset ? vgm+vgm_loop_offset : NULL;
-	uint8_t *ve = vgm+vgm_size;
-	song.data = NULL;
-	song.length = 0;
-	song.max = 0;
+
+	init_song(&song, base_interval);
 	
-	/*************** playback state **************/
 	playback_state_t state;
-	playback_state_t prv;
 	init_playback_state(&state);
-	init_playback_state(&prv);
 	
-	unsigned psg_latch = 0;
-	
-	unsigned active_stream_id = -1; /* the stream that last started a sample */
-	uint8_t stream_active_flags[0x100/8];
-	uint8_t stream_bank_tbl[0x100];
-	uint8_t stream_step_tbl[0x100];
-	uint8_t stream_base_tbl[0x100];
-	uint16_t stream_freq_tbl[0x100];
-	memset(&stream_active_flags,0,sizeof(stream_active_flags));
-	memset(&stream_bank_tbl,0,sizeof(stream_bank_tbl));
-	memset(&stream_step_tbl,0,sizeof(stream_step_tbl));
-	memset(&stream_base_tbl,0,sizeof(stream_base_tbl));
-	memset(&stream_freq_tbl,0,sizeof(stream_freq_tbl));
-	
-	unsigned stream_data_blocks = 0;
-	uint8_t *stream_data_block_tbl[0x100];
-	unsigned stream_data_block_sizes[0x100];
-	
-	unsigned current_wait = 0;
 	int loop_hit = 0;
-	while (1)
-	{
-		unsigned c = *vp++;
-		/****************** END COMMAND *********************/
-		if (c == 0x66)
-		{ /* end */
-			flush_playback_state(&song, &prv, &state);
-			write_song_command(&song, 0x6a, 0);
-			break;
-		}
-		/********************* DATA BLOCKS *******************/
-		else if (c == 0x67)
-		{ /* data block */
-			vp++; /* skip 0x66 */
-			unsigned type = *vp++;
-			unsigned size = get32(vp);
-			vp += 4;
-			
-			if (!type)
-			{
-				unsigned i = stream_data_blocks++;
-				stream_data_block_tbl[i] = vp;
-				stream_data_block_sizes[i] = size;
+	fseek(vgm_f, vgm_data_offset, SEEK_SET);
+	while (1) {
+		long cmd_offs = ftell(vgm_f);
+
+		// first check for loop
+		if (!loop_hit && vgm_loop_offset) {
+			if (cmd_offs == vgm_loop_offset) {
+				loop_hit = 1;
+				song.has_loop = 1;
+				for (int i = 0; i < CHANNELS; i++) {
+					flush_queued_wait(&song, &state, i);
+					write_song_command(&song.sequences[i], LOOP_CMD, 0);
+				}
+				reset_playback_state(&state);
+			} else if (cmd_offs > vgm_loop_offset) {
+				printf("WARNING: Passed loop point at $%X. Song will not loop.\n", vgm_loop_offset);
+				loop_hit = 1;
 			}
-			
-			vp += size;
 		}
-		/**************** SAMPLE STREAMS *****************/
-		else if (c == 0x90)
-		{ /* stream setup */
-			unsigned sid = *vp++;
-			unsigned chip = *vp++;
-			unsigned port = *vp++;
-			unsigned reg = *vp++;
-			if (chip == 2 && !port && reg == 0x2a)
-			{
+
+		// then start parsing commands
+		GET_VGM_BYTE(cmd);
+		/******************** END COMMAND ***********************/
+		if (cmd == 0x66) {
+			for (int i = 0; i < CHANNELS; i++) {
+				write_song_chn_command(&song, &state, i, END_CMD, 0);
+			}
+			break;
+		} /********************* WAIT COMMANDS *******************/
+		else if (cmd == 0x61) {
+			GET_VGM_BYTE(lo);
+			GET_VGM_BYTE(hi);
+			queue_wait(&state, lo | (hi<<8));
+		} else if (cmd == 0x62) {
+			queue_wait(&state, 735);
+		} else if (cmd == 0x63) {
+			queue_wait(&state, 882);
+		} else if (cmd >= 0x70 && cmd <= 0x7f) {
+			queue_wait(&state, (cmd&0x0f)+1);
+		} /******************** DATA BLOCKS *********************/
+		else if (cmd == 0x67) {
+			fseek(vgm_f, 1, SEEK_CUR);	// skip the 0x66 compatibility command
+			GET_VGM_BYTE(type);
+			GET_VGM_BYTE(s1);
+			GET_VGM_BYTE(s2);
+			GET_VGM_BYTE(s3);
+			GET_VGM_BYTE(s4);
+			unsigned size = s1|(s2<<8)|(s3<<16)|(s4<<24);
+
+			if (type != 0) {
+				printf("WARNING: Skipping data block of type %02X at %lX\n", type, cmd_offs);
+				fseek(vgm_f, size, SEEK_CUR);
+			} else {
+				unsigned char * block = malloc(size);
+				size_t block_read = fread(block, 1, size, vgm_f);
+				if (block_read != size)
+					goto vgm_read_error;
+
+				stream_data_block_tbl[stream_data_blocks] = block;
+				stream_data_block_sizes[stream_data_blocks] = size;
+				stream_data_blocks++;
+			}
+		} /********************* SAMPLES ***********************/
+		else if (cmd == 0x90) {	// stream setup
+			GET_VGM_BYTE(sid);
+			GET_VGM_BYTE(chip);
+			GET_VGM_BYTE(port);
+			GET_VGM_BYTE(reg);
+			if (chip == 2 && !port && reg == 0x2a) {
 				stream_active_flags[sid/8] |= 1 << (sid&7);
 			}
-		}
-		else if (c == 0x91)
-		{ /* stream data */
-			unsigned sid = *vp++;
-			unsigned bank = *vp++;
-			unsigned step = *vp++;
-			unsigned base = *vp++;
-			
+		} else if (cmd == 0x91) {	// stream data
+			GET_VGM_BYTE(sid);
+			GET_VGM_BYTE(bank);
+			GET_VGM_BYTE(step);
+			GET_VGM_BYTE(base);
+
 			stream_bank_tbl[sid] = bank;
 			stream_step_tbl[sid] = step;
 			stream_base_tbl[sid] = base;
-		}
-		else if (c == 0x92)
-		{ /* stream frequency */
-			unsigned sid = *vp++;
-			unsigned freq = get32(vp);
-			vp += 4;
-			
+		} else if (cmd == 0x92) {	// stream frequency
+			GET_VGM_BYTE(sid);
+			GET_VGM_BYTE(f1);
+			GET_VGM_BYTE(f2);
+			GET_VGM_BYTE(f3);
+			GET_VGM_BYTE(f4);
+			int freq = f1|(f2<<8)|(f3<<16)|(f4<<24);
+
 			/* right now we have freq in hz, change it to native value */
 			freq = round(freq * (Z80_CLOCKS_PER_SAMPLE / Z80_CLOCK) * 256.0);
-			
+
 			stream_freq_tbl[sid] = freq;
-			
+
 			/* set */
-			if ((stream_active_flags[sid/8] & (1 << (sid&7))))
-				state.sample_freq = freq;
-		}
-		else if (c == 0x94)
-		{ /* stop stream */
-			unsigned sid = *vp++;
-			if (sid == active_stream_id)
-			{
-				write_song_command(&song, 0x66, 0);
+			if ((stream_active_flags[sid/8] & (1 << (sid&7)))) {
+				if (freq != state.sample_freq) {
+					state.sample_freq = freq;
+					write_song_chn_command(&song, &state, FM_DAC_CHANNEL, 0xf9, freq);
+				}
 			}
-		}
-		else if (c == 0x95)
-		{ /* fast start stream */
-			unsigned sid = *vp++;
-			unsigned block = get16(vp);
-			vp += 2;
-			unsigned flags = *vp++;
-			
+		} else if (cmd == 0x94) {	// stop stream
+			GET_VGM_BYTE(sid);
+			if (sid == active_stream_id) {
+				write_song_chn_command(&song, &state, FM_DAC_CHANNEL, 0xfc, 0);
+			}
+		} else if (cmd == 0x95) {	// fast start stream
+			GET_VGM_BYTE(sid);
+			GET_VGM_BYTE(b1);
+			GET_VGM_BYTE(b2);
+			GET_VGM_BYTE(flags);
+			unsigned block = b1|(b2<<8);
+
 			if (block < stream_data_blocks && (stream_active_flags[sid/8] & (1 << (sid&7))))
 			{
 				active_stream_id = sid;
-				
+
 				uint8_t *bp = stream_data_block_tbl[block];
 				sample_t new;
 				new.data = bp;
 				new.size = stream_data_block_sizes[block];
-				
+
 				/* if we're not looping, crop out trailing silence */
 				if (!(flags & 1))
 				{
 					size_t cropped_size = new.size;
-					
+
 					while (cropped_size > 1)
 					{
 						if (abs(new.data[cropped_size-2]-new.data[cropped_size-1]) > 4) break;
-						
+
 						cropped_size--;
 					}
 					if (cropped_size < 2) cropped_size = 0;
-					
+
 					new.size = cropped_size;
 				}
-				
+
 				if (!new.size)
 				{ /* we cropped everything (or the sample is just empty), just stop */
-					write_song_command(&song, 0x66, 0);
+					write_song_chn_command(&song, &state, FM_DAC_CHANNEL, 0xfc, 0);
 				}
 				else
 				{
@@ -760,267 +716,272 @@ int load_vgm(char * vgm_filename)
 						memcpy(new_added->data,bp,new_added->size);
 						samples_size += new_added->size;
 					}
-					
-					/* command */
-					write_song_command(&song, 0x64 + ((flags & 1) ? 1 : 0), new_id);
+
+					/* play command */
+					write_song_chn_command(&song, &state, FM_DAC_CHANNEL, 0xfa + ((flags & 1) ? 1 : 0), new_id);
+					song.sequences_used[FM_DAC_CHANNEL] = FM_USED;	// special case for this...
 				}
 			}
-		}
-		/********************** FM COMMANDS ********************/
-		else if (c == 0x52 || c == 0x53)
-		{
-			unsigned part = c & 1;
-			unsigned r = *vp++;
-			unsigned v = *vp++;
-			
-			/* I'm not gonna do anything if your FM register is invalid. */
-			if (is_valid_fm_register(part,r))
-			{
-				/* only applies for per-operator/channel registers */
-				unsigned chn = (r & 3) + (part ? 3 : 0);
-				unsigned op = (r & 0xc) >> 2;
-				
-				unsigned rr = r & 0xf0;
-				unsigned rrr = r & 0xfc;
-				
-				/********************* fm patch control ***********************/
-				if (is_fm_patch_register(part,r))
-				{
-					fm_patch_t *p = &state.fm.patch[chn];
-					
-					if (rr == 0x30)
-						p->reg30[op] = v & 0x7f;
-					else if (rr == 0x40)
-						p->reg40[op] = v & 0x7f;
-					else if (rr == 0x50)
-						p->reg50[op] = v & 0xdf;
-					else if (rr == 0x60)
-						p->reg60[op] = v & 0x9f;
-					else if (rr == 0x70)
-						p->reg70[op] = v & 0x1f;
-					else if (rr == 0x80)
-						p->reg80[op] = v;
-					else if (rr == 0x90)
-						p->reg90[op] = v & 0x0f;
-					else if (rrr == 0xb0)
-						p->regb0 = v & 0x3f;
-					else if (rrr == 0xb4)
-						p->regb4 = v & 0xf7;
+		} /******************** FM COMMANDS *********************/
+		else if (cmd == 0x52 || cmd == 0x53) {
+			GET_VGM_BYTE(reg);
+			GET_VGM_BYTE(val);
+			int part = cmd & 1;
+
+			// main command handler
+			if (!part && reg == 0x22) {	// lfo
+				state.queued_lfo = val & 0x0f;
+			} else if (!part && reg == 0x27) {	// extd. chn3
+				int enable = val & 0x40;
+				if (enable != state.fm.chn3_mode) {
+					write_song_chn_command(&song, &state, FM_CHN3, 0xf3 + (enable ? 1 : 0), 0);
+					state.fm.chn3_mode = enable;
 				}
-				/*********************** everything else ********************/
-				else
-				{
-					/****** frequency ******/
-					if (r >= 0xa0 && r < 0xa7)
-					{
-						uint16_t *freq = &state.fm.freq[chn];
-						if (!(r & 4))
-						{ /* low */
-							*freq = (*freq & 0xff00) | v;
-						}
-						else
-						{ /* high */
-							*freq = (*freq & 0xff) | (v<<8);
-						}
+			} else if (!part && reg == 0x2b) {	// dac toggle
+				int enable = val & 0x80;
+				if (enable != state.fm.dac_enable) {
+					write_song_chn_command(&song, &state, FM_DAC_CHANNEL, 0xf3 + (enable ? 1 : 0), 0);
+					state.fm.dac_enable = enable;
+				}
+			} else if (!part && reg == 0x28) {	// keyon
+				if ((val & 3) != 3) {
+					int chn = val & 7;
+					if (chn >= 4) chn--;
+					int keyon = val >> 4;
+
+					if (keyon) {
+						song.sequences_used[chn+FIRST_FM_CHANNEL] |= FM_USED_KEYON;
 					}
-					
-					/***** special frequency ******/
-					if (r >= 0xa8 && r < 0xaf)
-					{
-						uint16_t *freq = &state.fm.extd_freq[r&3];
-						if (!(r & 4))
-						{ /* low */
-							*freq = (*freq & 0xff00) | v;
-						}
-						else
-						{ /* high */
-							*freq = (*freq & 0xff) | (v<<8);
-						}
-					}
-					
-					/******** following regs only exist in part 1, but is_valid_fm_register() has already filtered them *********/
-					/******** key on/off ********/
-					if (r == 0x28)
-					{
-						unsigned chn = v & 0x7;
-						if (chn >= 4) chn--;
-						v &= 0xf0;
-						
-						uint8_t *ko = &state.fm.keyon[chn];
-						if (v != *ko)
-						{
-							*ko = v;
-							flush_fm_keyon_state(&song, &prv, &state);
-						}
-					}
-					
-					/********* chn.3 mode *********/
-					if (r == 0x27)
-					{
-						v &= 0x40;
-						state.fm.chn3_mode = v;
-					}
-					
-					/********* dac toggle ********/
-					if (r == 0x2b)
-					{
-						v &= 0x80;
-						v >>= 7;
-						state.fm.dac_enable = v;
-					}
-					
-					/******** lfo ***********/
-					if (r == 0x22)
-					{
-						v &= 0x0f;
-						state.fm.lfo = v;
+					if (keyon != state.fm.chn[chn].keyon) {
+						write_song_chn_command(&song, &state, chn+FIRST_FM_CHANNEL, 0xe0 + keyon, 0);
+						state.fm.chn[chn].keyon = keyon;
 					}
 				}
-			}
-		}
-		/************************* PSG COMMANDS *******************/
-		else if (c == 0x50)
-		{
-			unsigned v = *vp++;
-			if (v & 0x80)
-			{ /* latch */
-				psg_latch = v & 0x70;
-				unsigned data = v & 0x0f;
-				unsigned channel = (psg_latch >> 5) & 3;
-				if (psg_latch & 0x10)
-					state.psg.volume[channel] = ((~data)&0x0f);
-				else if (channel == 3)
-					state.psg.freq[3] = data & 7;
-				else
-					state.psg.freq[channel] = (state.psg.freq[channel] & 0x3f0) | data;
-			}
-			else
-			{ /* data */
-				unsigned data = v & 0x3f;
-				unsigned channel = (psg_latch >> 5) & 3;
-				if (psg_latch & 0x10)
-					state.psg.volume[channel] = ((~data)&0x0f);
-				else if (channel == 3)
-					state.psg.freq[3] = data & 7;
-				else
-					state.psg.freq[channel] = (state.psg.freq[channel] & 0xf) | (data<<4);
-			}
-		}
-		/********************** WAIT COMMANDS *********************/
-		else if ((c & 0xf0) == 0x70)
-		{ /* don't bother with minuscule waits */
-			current_wait += (c & 0x0f)+1;
-		}
-		else if (c >= 0x61 && c <= 0x63)
-		{ /* regular waits */
-			while (1)
-			{
-				switch (c)
-				{
-					case 0x61:
-					{
-						unsigned wait = *vp++;
-						wait |= (*vp++)<<8;
-						
-						current_wait += wait;
+			} else if ((reg >= 0x30 && reg < 0x9f) || (reg >= 0xb0 && reg < 0xb7)) {	// fm patch register
+				if ((reg & 3) != 3) {
+					int chn = (reg & 3) + (part ? 3 : 0);
+					int op = (reg & 0x0c) >> 2;
+					int p1 = reg & 0xf0;
+					int p2 = reg & 0xfc;
+
+					fm_patch_t * p = &state.fm.chn[chn].patch;
+					int id;
+					short * cur_val = NULL;
+					int v2 = val;
+					if (p1 == 0x30) {
+						cur_val = &p->reg30[op];
+						id = 0x00 + op;
+						v2 &= 0x7f;
+					} else if (p1 == 0x40) {
+						cur_val = &p->reg40[op];
+						id = 0x04 + op;
+						v2 &= 0x7f;
+						if (v2 != 0x7f) {
+							song.sequences_used[chn+FIRST_FM_CHANNEL] |= FM_USED_NZ_TL;
+						}
+					} else if (p1 == 0x50) {
+						cur_val = &p->reg50[op];
+						id = 0x08 + op;
+						v2 &= 0xdf;
+					} else if (p1 == 0x60) {
+						cur_val = &p->reg60[op];
+						id = 0x0c + op;
+						v2 &= 0x9f;
+					} else if (p1 == 0x70) {
+						cur_val = &p->reg70[op];
+						id = 0x10 + op;
+						v2 &= 0x1f;
+					} else if (p1 == 0x80) {
+						cur_val = &p->reg80[op];
+						id = 0x14 + op;
+					} else if (p1 == 0x90) {
+						cur_val = &p->reg90[op];
+						id = 0x18 + op;
+						v2 &= 0x0f;
+					} else if (p2 == 0xb0) {
+						cur_val = &p->regb0;
+						id = 0x1c;
+						v2 &= 0x3f;
+					} else if (p2 == 0xb4) {
+						cur_val = &p->regb4;
+						id = 0x1d;
+						v2 &= 0xf7;
+					}
+
+					if (cur_val) {
+						if (*cur_val != v2) {
+							write_song_chn_command(&song, &state, chn+FIRST_FM_CHANNEL, 0x80 + id, v2);
+							*cur_val = v2;
+						}
+					}
+				}
+			} else if (reg >= 0xa0 && reg != 0xa3 && reg < 0xa7) {	// frequency
+				int chn = (reg & 3) + (part ? 3 : 0);
+				int is_hi = (reg & 4);
+
+				int lo = is_hi ? -1 : val;
+				int hi = is_hi ? (val & 0x3f) : -1;
+
+				// peek ahead at the file to look for a consecutive frequency command on this channel
+				int check_peek_reg = reg & (~4);
+				int peek_cmd = EOF;
+				int peek_reg = EOF;
+				int peek_val = EOF;
+				while (1) {
+					peek_cmd = fgetc(vgm_f);
+					peek_reg = fgetc(vgm_f);
+					peek_val = fgetc(vgm_f);
+
+					if (peek_cmd == cmd && (peek_reg & (~4)) == check_peek_reg) {
+						if (peek_reg & 4) {
+							hi = (peek_val & 0x3f);
+						} else {
+							lo = peek_val;
+						}
+					} else {
 						break;
 					}
-					case 0x62:
-						current_wait += NTSC_INTERVAL;
+				}
+				ungetc(peek_val, vgm_f);
+				ungetc(peek_reg, vgm_f);
+				ungetc(peek_cmd, vgm_f);
+
+				// now change the frequency of this channel
+				write_song_chn_pitch_change(&song, &state, chn+FIRST_FM_CHANNEL, lo, hi);
+			} else if (reg >= 0xa8 && reg != 0xab && reg < 0xaf) {	// extd chn.3 frequency
+				int op = reg & 3;
+				int is_hi = reg & 4;
+
+				int lo = is_hi ? -1 : val;
+				int hi = is_hi ? (val & 0x3f) : -1;
+
+				// peek ahead at the file to look for a consecutive frequency command on this channel
+				int check_peek_reg = reg & (~4);
+				int peek_cmd = EOF;
+				int peek_reg = EOF;
+				int peek_val = EOF;
+				while (1) {
+					peek_cmd = fgetc(vgm_f);
+					peek_reg = fgetc(vgm_f);
+					peek_val = fgetc(vgm_f);
+
+					if (peek_cmd == cmd && (peek_reg & (~4)) == check_peek_reg) {
+						if (peek_reg & 4) {
+							hi = (peek_val & 0x3f);
+						} else {
+							lo = peek_val;
+						}
+					} else {
 						break;
-					case 0x63:
-						current_wait += PAL_INTERVAL;
+					}
+				}
+				ungetc(peek_val, vgm_f);
+				ungetc(peek_reg, vgm_f);
+				ungetc(peek_cmd, vgm_f);
+
+				// now change the frequency of this operator
+				int16_t * prv = &state.fm.extd_freq[op];
+				int comb = lo | (hi<<8);
+				if (*prv != comb) {
+					write_song_chn_command(&song, &state, FM_CHN3, 0xf6+op, comb);
+					*prv = comb;
+				}
+			}
+
+			// handle a queued lfo command
+			if (state.queued_lfo >= 0) {
+				int found_chn = -1;
+				for (int i = 0; i < FM_CHANNELS; i++) {
+					if (fm_patch_uses_lfo(&state.fm.chn[i].patch)) {
+						found_chn = i;
 						break;
+					}
 				}
-				
-				c = *vp;
-				if (!(c >= 0x61 && c <= 0x63) || vp == vlp) break;
-				vp++;
-			}
-			
-			flush_playback_state(&song, &prv, &state);
-			
-			unsigned ntsc_frames = current_wait / NTSC_INTERVAL;
-			unsigned ntsc_extra = current_wait % NTSC_INTERVAL;
-			unsigned pal_frames = current_wait / PAL_INTERVAL;
-			unsigned pal_extra = current_wait % PAL_INTERVAL;
-			
-			if (!ntsc_extra)
-			{
-				while (ntsc_frames > 0)
-				{
-					unsigned i = min(ntsc_frames,0x20);
-					write_song_command(&song, 0xc0 + (i - 1), 0);
-					ntsc_frames -= i;
+
+				if (found_chn >= 0) {
+					if (state.fm.lfo != state.queued_lfo) {
+						write_song_chn_command(&song, &state, found_chn+FIRST_FM_CHANNEL, 0xf5, state.queued_lfo);
+						state.fm.lfo = state.queued_lfo;
+					}
+					state.queued_lfo = -1;
 				}
 			}
-			else if (!pal_extra)
-			{
-				while (pal_frames > 0)
-				{
-					unsigned i = min(pal_frames,0x20);
-					write_song_command(&song, 0xe0 + (i - 1), 0);
-					pal_frames -= i;
+		} /******************** PSG COMMANDS ********************/
+		else if (cmd == 0x50) {
+			GET_VGM_BYTE(val);
+			if (!(val & 0x80)) {
+				printf("ERROR: stranded PSG data write at %lX\n", cmd_offs);
+				goto vgm_read_error;
+			}
+
+			int chn = (val & 0x60) >> 5;
+			int type = (val & 0x10);
+			int data = (val & 0x0f);
+
+			// peek ahead for data writes
+			int second_data = -1;
+			int peek_cmd = EOF;
+			int peek_val = EOF;
+			while (1) {
+				peek_cmd = fgetc(vgm_f);
+				peek_val = fgetc(vgm_f);
+
+				if (peek_cmd == 0x50 && !(peek_val & 0x80)) {
+					second_data = peek_val & 0x3f;
+				} else {
+					break;
 				}
 			}
-			else
-			{
-				while (current_wait > 0)
-				{
-					unsigned i = min(current_wait,0xffff);
-					write_song_command(&song, 0x6b, i);
-					current_wait -= i;
+			ungetc(peek_val, vgm_f);
+			ungetc(peek_cmd, vgm_f);
+
+			// act on the value
+			if (type) {	// volume write
+				int8_t * prv = &state.psg.chn[chn].volume;
+				int new = second_data < 0 ? val : second_data;
+				new &= 0x0f;
+
+				if (*prv != new) {
+					if (new != 0x0f) {
+						song.sequences_used[chn+FIRST_PSG_CHANNEL] |= PSG_USED_NZ_VOL;
+					}
+					write_song_chn_command(&song, &state, chn+FIRST_PSG_CHANNEL, 0xe0 + new, 0);
+					*prv = new;
 				}
+			} else if (chn == 3) {	// noise period write
+				int new = second_data < 0 ? val : second_data;
+				new &= 7;
+				write_song_chn_pitch_change(&song, &state, PSG_NOISE_CHANNEL, new, -1);
+			} else {	// period write
+				if (second_data < 0) {	// we cannot support incomplete writes since the register is not split evenly by byte
+					printf("ERROR: PSG freq write without data at %lX\n", cmd_offs);
+					goto vgm_read_error;
+				}
+
+				int new = data | (second_data<<4);
+				int lo = new & 0xff;
+				int hi = (new>>8) & 3;
+				write_song_chn_pitch_change(&song, &state, chn+FIRST_PSG_CHANNEL, lo, hi);
 			}
-			
-			current_wait = 0;
 		}
 		/********************* BAD COMMANDS *********************/
-		else if (c >= 0x30 && c < 0x51)
-			vp += 1;
-		else if (c >= 0x51 && c < 0x60)
-			vp += 2;
-		else if (c >= 0xa0 && c < 0xc0)
-			vp += 2;
-		else if (c >= 0xc0 && c < 0xe0)
-			vp += 3;
-		else if (c >= 0xe1)
-			vp += 4;
+		else if (cmd >= 0x30 && cmd < 0x51)
+			fseek(vgm_f, 1, SEEK_CUR);
+		else if (cmd >= 0x51 && cmd < 0x60)
+			fseek(vgm_f, 2, SEEK_CUR);
+		else if (cmd >= 0xa0 && cmd < 0xc0)
+			fseek(vgm_f, 2, SEEK_CUR);
+		else if (cmd >= 0xc0 && cmd < 0xe0)
+			fseek(vgm_f, 3, SEEK_CUR);
+		else if (cmd >= 0xe1)
+			fseek(vgm_f, 4, SEEK_CUR);
 		else
 		{
-			printf("Impossible command $%02X at $%X. Cannot continue.\n",c,(unsigned)(vp-vgm-1));
-			goto load_vgm_fail;
-		}
-		
-		/******************* check for loop ****************/
-		if (!loop_hit && vlp)
-		{
-			if (vp > vlp)
-			{
-				printf("WARNING: Passed loop point at $%X. Song will not loop.\n", vgm_loop_offset);
-				loop_hit = 1;
-			}
-			else if (vp == vlp)
-			{
-				flush_playback_state(&song, &prv, &state);
-				write_song_command(&song, 0x69, 0);
-				loop_hit = 1;
-			}
-		}
-		
-		/******************* peculiar behavior failsafes ****************/
-		if (song.length > 0x100000)
-		{
-			puts("Passed 0x100000 output commands. This either indicates a bug in this program or an extremely large VGM file.");
-			goto load_vgm_fail;
-		}
-		
-		if (vp > ve)
-		{
-			puts("Passed VGM end-of-file. This either indicates a bug in this program or a malformed VGM file.");
+			printf("Impossible command $%02X at $%lX. Cannot continue.\n",cmd,cmd_offs);
 			goto load_vgm_fail;
 		}
 	}
+
 	
 	
 	
@@ -1032,33 +993,49 @@ int load_vgm(char * vgm_filename)
 	puts("Success.");
 	return_val = 0;
 	
-	add_song(&song);
-	for (size_t i = 0; i < song.length; i++) {
-		songs_size += command_size_tbl[song.data[i].cmd];
+	for (int i = 0; i < CHANNELS; i++) {
+		if (song_channel_is_used(&song, i)) {
+			for (size_t j = 0; j < song.sequences[i].length; j++) {
+				unsigned cmd = song.sequences[i].data[i].cmd;
+				if (cmd < 0x100) {
+					songs_size += command_size_tbl[cmd];
+				}
+			}
+		} else {
+			free_song_command_sequence(&song.sequences[i]);
+		}
 	}
+	add_song(&song);
 	
 	goto load_vgm_cleanup;
+
+vgm_read_error:
+	printf("READ ERROR: %s at 0x%lX\n", ferror(vgm_f) ? strerror(errno) : "premature end-of-file", ftell(vgm_f));
 	
 load_vgm_fail:
 	puts("Failed.");
 	
 	/* discard data generated by a bad vgm */
-	free(song.data);
-	for (size_t i = old_fm_patches; i < fm_patches; i++)
-		/* fm patch cleanup here */ ;
+	free_song(&song);
 	for (size_t i = old_samples; i < samples; i++)
 		free(sample_tbl[i].data);
 	for (size_t i = old_songs; i < songs; i++)
-		free(song_tbl[i].data);
-	fm_patches = old_fm_patches;
+		free_song(&song_tbl[i]);
 	samples = old_samples;
 	songs = old_songs;
+	songs_size = old_songs_size;
 	samples_size = old_samples_size;
 	
 	
 load_vgm_cleanup:
-	
-	free(vgm);
+	if (vgm_f) {	// close vgm file
+		fclose(vgm_f);
+	}
+
+	for (unsigned i = 0; i < stream_data_blocks; i++) {	// free data blocks
+		free(stream_data_block_tbl[i]);
+	}
+
 	return return_val;
 }
 
@@ -1084,18 +1061,13 @@ load_vgm_cleanup:
 //   can fold these into a single routine. e.g. if we have a routine "A B C D", we
 //   can call the routine in full or call partway starting at "B" to make "B C D"
 
-#define SONG_CMD	((unsigned)-4)	// used to define song starts in the compressed datastream
-#define LAB_CMD	((unsigned)-3)	// used to define label numbers in the compressed datastream
-#define NOP_CMD ((unsigned)-2)	// temporary cmd value used to hold "holes" in the datastream
-#define CALL_CMD	((unsigned)-1)	// temporary cmd value used when building the pairs to denote a token id
-
 #define INSTANCE_NONE (~(size_t)0)
 #define SEQUENCE_NONE (~(size_t)0)
 
 #define CALL_SIZE 4
 #define INLINE_THRESHOLD 4	// subroutines <= this size are never created
 
-#define CALL_NEST_LIMIT 32
+#define CALL_NEST_LIMIT (31/3)
 
 /////////////////////// pair (all pairs in data, used when building the dictionary)
 
@@ -1328,12 +1300,12 @@ void init_pair_list(song_command_pair_list_t * list, song_command_t * data, size
 		song_command_t * this = &data[index];
 
 		// if either this or the next pair would have an invalid control command then skip
-		if (this[0].cmd == 0x69 || this[1].cmd == 0x69 || this[0].cmd == 0x6a || this[1].cmd == 0x6a) {
+		if (this[0].cmd == LOOP_CMD || this[1].cmd == LOOP_CMD || this[0].cmd == END_CMD || this[1].cmd == END_CMD) {
 			continue;
 		}
 
 		// otherwise add this pair to the list
-		song_command_pair_t * pair = add_pair_instance(list, &this[0], &this[1], index+0, index+1);
+		add_pair_instance(list, &this[0], &this[1], index+0, index+1);
 	}
 }
 
@@ -1382,6 +1354,8 @@ typedef struct {
 
 //////////////////////// main compression procedure
 
+size_t first_label_id = 0;	// first label id that can be used by subroutines
+
 song_command_sequence_t compressed_song_data;
 
 int write_compressed_call_command(song_command_sequence_t * song, song_command_pair_dict_t * dict_tbl, song_command_pair_dict_sequence_t * seq_tbl, size_t di, size_t * size_ptr, int is_end);	// forward-declare
@@ -1417,7 +1391,7 @@ int write_compressed_call_command(song_command_sequence_t * song, song_command_p
 			di = d->pair[1].param;
 			d = &dict_tbl[di];
 		}
-		write_compressed_song_command(song, dict_tbl, seq_tbl, is_end ? 0x67 : 0x68, di, size_ptr, is_end);
+		write_compressed_song_command(song, dict_tbl, seq_tbl, is_end ? 0xfd : 0xfe, di + first_label_id, size_ptr, is_end);
 		return 1;
 	}
 }
@@ -1431,13 +1405,28 @@ void compress_song_data(int max_iterations, unsigned pair_freq_threshold) {
 	// build the complete song datastream
 	size_t all_song_data_length = 0;
 	for (size_t i = 0; i < songs; i++) {
-		all_song_data_length += song_tbl[i].length;
+		song_t * s = &song_tbl[i];
+		for (int j = 0; j < CHANNELS; j++) {
+			if (song_channel_is_used(s, j)) {
+				all_song_data_length += s->sequences[j].length;
+				s->sequence_label_ids[j] = first_label_id++;
+				if (s->has_loop) {
+					s->sequence_loop_label_ids[j] = first_label_id++;
+				}
+			}
+		}
 	}
 	song_command_t * all_song_data = malloc(all_song_data_length * sizeof(song_command_t));
 	size_t all_song_data_index = 0;
 	for (size_t i = 0; i < songs; i++) {
-		memcpy(&all_song_data[all_song_data_index], song_tbl[i].data, song_tbl[i].length*sizeof(song_command_t));
-		all_song_data_index += song_tbl[i].length;
+		song_t * s = &song_tbl[i];
+		for (int j = 0; j < CHANNELS; j++) {
+			if (song_channel_is_used(s, j)) {
+				song_command_sequence_t * seq = &s->sequences[j];
+				memcpy(&all_song_data[all_song_data_index], seq->data, seq->length*sizeof(song_command_t));
+				all_song_data_index += seq->length;
+			}
+		}
 	}
 
 	// run through the song data and find initial set of pairs
@@ -1453,7 +1442,7 @@ void compress_song_data(int max_iterations, unsigned pair_freq_threshold) {
 	size_t dict_max = 0x10000;
 	size_t dict_length = 0;
 	int fib[3] = {0,1,1};
-	while (iter < max_iterations && pair_list.highest_pair_freq >= pair_freq_threshold) {
+	while ((max_iterations < 0 || iter < max_iterations) && pair_list.highest_pair_freq >= pair_freq_threshold) {
 		iter++;
 		if (iter >= fib[2]) {	// iterations get faster so we don't want to print on every one
 			printf("%d...", iter);
@@ -1513,7 +1502,7 @@ void compress_song_data(int max_iterations, unsigned pair_freq_threshold) {
 				while (new_right < all_song_data_length && all_song_data[new_right].cmd == NOP_CMD) {
 					remove_pair_instance(&pair_list, &pair_list.left_instance_tbl[new_right++]);
 				}
-				if (new_right >= all_song_data_length || all_song_data[new_right].cmd == 0x69 || all_song_data[new_right].cmd == 0x6a)
+				if (new_right >= all_song_data_length || all_song_data[new_right].cmd == LOOP_CMD || all_song_data[new_right].cmd == END_CMD)
 					new_right = INSTANCE_NONE;
 
 				// update the pair relying on the left side we just replaced, if any
@@ -1759,19 +1748,39 @@ sub_call_level_unknown:;
 
 	//// write main song data
 	int song_id = 0;
-	int cur_song_id = -1;
+	int chn_id = -1;
+	int write_song_label = 1;
 	for (size_t i = 0; i < all_song_data_length; i++) {
-		if (song_id != cur_song_id) {
-			write_song_command(&compressed_song_data, SONG_CMD, song_id);
-			cur_song_id = song_id;
+		if (write_song_label) {
+			do {
+				chn_id++;
+				if (chn_id == CHANNELS) {
+					chn_id = 0;
+					song_id++;
+				}
+			} while (!song_channel_is_used(&song_tbl[song_id], chn_id));
+			size_t song_label = song_tbl[song_id].sequence_label_ids[chn_id];
+			write_song_command(&compressed_song_data, LAB_CMD, song_label);
+			write_song_label = 0;
 		}
 
 		unsigned cmd = all_song_data[i].cmd;
 		unsigned param = all_song_data[i].param;
-		write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, cmd, param, &compressed_song_data_size, 0);
+		if (cmd == END_CMD) {
+			size_t loop_label = song_tbl[song_id].sequence_loop_label_ids[chn_id];
+			if (loop_label == SEQUENCE_NONE) {
+				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, 0xff, 0, &compressed_song_data_size, 0);
+			} else {
+				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, 0xfd, loop_label, &compressed_song_data_size, 0);
+			}
 
-		if (cmd == 0x6a)
-			song_id++;
+			write_song_label = 1;
+		} else if (cmd == LOOP_CMD) {
+			size_t loop_label = song_tbl[song_id].sequence_loop_label_ids[chn_id];
+			write_song_command(&compressed_song_data, LAB_CMD, loop_label);
+		} else {
+			write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, cmd, param, &compressed_song_data_size, 0);
+		}
 	}
 
 	//// write subroutines
@@ -1788,7 +1797,7 @@ sub_call_level_unknown:;
 			song_command_pair_dict_t * d = &dict_tbl[di];
 			while (1) {
 				if (d->sequence_call_count > 0) {
-					write_song_command(&compressed_song_data, LAB_CMD, di);
+					write_song_command(&compressed_song_data, LAB_CMD, di + first_label_id);
 				}
 
 				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, d->pair[0].cmd, d->pair[0].param, &compressed_song_data_size, 0);
@@ -1799,7 +1808,7 @@ sub_call_level_unknown:;
 				d = &dict_tbl[di];
 			}
 			if (!write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, d->pair[1].cmd, d->pair[1].param, &compressed_song_data_size, 1))
-				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, 0x6a, 0, &compressed_song_data_size, 0);
+				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, 0xff, 0, &compressed_song_data_size, 0);
 		}
 	}
 
@@ -1826,44 +1835,95 @@ int main(int argc, char *argv[])
 {
 	if (argc < 3)
 	{
-		puts("usage: knl-vgm-convert outname vgms...");
+		printf(
+			"usage: knl-vgm-convert [option]... vgms...\n"
+			"options:\n"
+			"\t-o filename\n"
+			"\t--base-interval n        (default 735)\n"
+			"\t--max-iterations n       (default 200000)\n"
+			"\t--pair-freq-threshold n  (default 2)\n"
+		);
 		return EXIT_FAILURE;
 	}
+	const char * out_name = NULL;
+	int base_interval = -1;
+	int max_iterations = 200000;
+	int pair_freq_threshold = 2;
 	
-	for (int i = 2; i < argc; i++)
+	int argi = 1;
+	while (argi < argc) {
+		const char * arg = argv[argi];
+		const char * param = (argi+1) < argc ? argv[argi+1] : NULL;
+		long param_int = param ? strtol(param, NULL, 0) : -1;
+		if (!strcmp(arg, "--")) {	// stop arg parsing
+			argi++;
+			break;
+		} else if (!strcmp(arg, "-o")) {
+			out_name = param ? param : out_name;
+			argi += 2;
+		} else if (!strcmp(arg, "--base-interval")) {
+			base_interval = param ? param_int : base_interval;
+			argi += 2;
+		} else if (!strcmp(arg, "--max-iterations")) {
+			max_iterations = param ? param_int : max_iterations;
+			argi += 2;
+		} else if (!strcmp(arg, "--pair-freq-threshold")) {
+			pair_freq_threshold = param ? param_int : pair_freq_threshold;
+			argi += 2;
+		} else if (arg[0] == '-') {
+			printf("WARNING: Unrecognized command line option \"%s\".", arg);
+			argi++;
+		} else {
+			break;
+		}
+	}
+
+	if (!out_name) {
+		puts("No output filename defined.");
+		return EXIT_FAILURE;
+	}
+	if (base_interval <= 0) {
+		base_interval = 735;
+		puts("WARNING: Base interval is not defined, defaulting to 735.");
+	}
+	if (max_iterations <= 0) {
+		max_iterations = -1;
+	}
+	if (pair_freq_threshold < 2) {
+		pair_freq_threshold = 2;
+	}
+
+	if (argi >= argc) {
+		puts("No input filenames defined.");
+		return EXIT_FAILURE;
+	}
+	for (int i = argi; i < argc; i++)
 	{
-		load_vgm(argv[i]);
-		putchar('\n');
+		load_vgm(argv[i], base_interval);
 		for (int i = 0; i < 75; i++) putchar('-');
 		putchar('\n');
 	}
 
-	compress_song_data(50000, 2);
+	compress_song_data(max_iterations, pair_freq_threshold);
 	
 	
 	/********* report ********************/
-	printf("\n%zu songs, %zu FM patches, %zu samples.\n",songs,fm_patches,samples);
+	printf("\n%zu songs, %zu samples.\n",songs,samples);
 	if (!songs)
 	{
 		puts("No valid songs, quitting.");
 		return EXIT_FAILURE;
 	}
 	
-	size_t fm_patches_size = fm_patches*(7*4 + 2);
-	size_t total_size = songs_size+fm_patches_size+samples_size;
-	printf("Song data: %zu bytes, FM patches: %zu bytes, samples: %zu bytes.\n"
-		,songs_size,fm_patches_size,samples_size);
+	size_t total_size = songs_size+samples_size;
+	printf("Song data: %zu bytes, samples: %zu bytes.\n"
+		,songs_size,samples_size);
 	printf("Total size: %zu bytes (%.1f KiB).\n", total_size,total_size/1024.0);
 	
 	int toomany = 0;
 	if (songs > MAX_SONGS)
 	{
 		printf("Too many songs! (max %u)\n",MAX_SONGS);
-		toomany++;
-	}
-	if (fm_patches > MAX_FM_PATCHES)
-	{
-		printf("Too many FM patches! (max %u)\n",MAX_FM_PATCHES);
 		toomany++;
 	}
 	if (samples > MAX_SAMPLES)
@@ -1876,10 +1936,10 @@ int main(int argc, char *argv[])
 	
 	
 	/******************************** OUTPUT FILE ***********************************/
-	FILE *f = fopen(argv[1],"w");
+	FILE *f = fopen(out_name,"w");
 	if (!f)
 	{
-		printf("Couldn't open %s: %s\n",argv[1],strerror(errno));
+		printf("Couldn't open %s: %s\n",out_name,strerror(errno));
 		return EXIT_FAILURE;
 	}
 	
@@ -1890,47 +1950,34 @@ int main(int argc, char *argv[])
 	
 	/************** song data streams ****************/
 	/***** pointers *****/
-	fprintf(f,"\n\n; Song data streams.\n align 1\nknl_song_tbl: dl ");
+	fprintf(f,"\n\n; Song data streams.\n align 1\nknl_song_tbl:\n");
 	for (size_t i = 0; i < songs; i++)
 	{
-		fprintf(f,"knl_song_%zu",i);
-		if (i < songs-1) fputc(',',f);
+		const song_t * s = &song_tbl[i];
+		fprintf(f,"\tdl ");
+		for (int j = 0; j < CHANNELS; j++) {
+			size_t label = s->sequence_label_ids[j];
+			if (label == SEQUENCE_NONE) {
+				fputc('0',f);
+			} else {
+				fprintf(f,"knl_lab_%zu",label);
+			}
+			if (j < 9) {
+				fputc(',', f);
+			}
+		}
+		fputc('\n', f);
 	}
 	
 	/***** actual data *****/
-	/*for (size_t i = 0; i < songs; i++)
-	{
-		song_t *s = &song_tbl[i];
-		fprintf(f,"\nknl_song_%zu: db ",i);
-		
-		for (size_t j = 0; j < s->length; j++)
-		{
-			const song_command_t * sc = &s->data[j];
-			unsigned command_size = command_size_tbl[sc->cmd];
-			if (!command_size) {
-				printf("Illegal command %02X found in song %zu\n", sc->cmd, i);
-				return EXIT_FAILURE;
-			}
-			fprintf(f,"%u",sc->cmd);
-			for (unsigned b = 1; b < command_size; b++) {
-				fprintf(f,",%u",(sc->param>>(8*(b-1)))&0xff);
-			}
-			if (j < s->length-1) {
-				fputc(',', f);
-				fputc(' ', f);
-			}
-		}
-	}*/
 	for (size_t i = 0; i < compressed_song_data.length; i++) {
 		const song_command_t * sc = &compressed_song_data.data[i];
-		if (sc->cmd == SONG_CMD) {
-			fprintf(f,"\nknl_song_%u:",sc->param);
-		} else if (sc->cmd == LAB_CMD) {
+		if (sc->cmd == LAB_CMD) {
 			fprintf(f,"\nknl_lab_%u:",sc->param);
-		} else if (sc->cmd == 0x67) {
-			fprintf(f,"\n\tdl knl_lab_%u+$67000000",sc->param);
-		} else if (sc->cmd == 0x68) {
-			fprintf(f,"\n\tdl knl_lab_%u+$68000000",sc->param);
+		} else if (sc->cmd == 0xfd) {
+			fprintf(f,"\n\tdl ($fd<<24)+knl_lab_%u",sc->param);
+		} else if (sc->cmd == 0xfe) {
+			fprintf(f,"\n\tdl ($fe<<24)+knl_lab_%u",sc->param);
 		} else if (sc->cmd < 0x100) {
 			unsigned command_size = command_size_tbl[sc->cmd];
 			if (!command_size) {
@@ -1941,39 +1988,6 @@ int main(int argc, char *argv[])
 			for (unsigned b = 1; b < command_size; b++) {
 				fprintf(f,",$%02X",(sc->param>>(8*(b-1)))&0xff);
 			}
-		}
-	}
-	
-	
-	
-	/************** fm patches ****************/
-	/***** pointers *****/
-	fprintf(f,"\n\n; FM patches.\n align 1\nknl_fm_patch_tbl:");
-	if (fm_patches)
-	{
-		fprintf(f," dl ");
-		
-		for (size_t i = 0; i < fm_patches; i++)
-		{
-			fprintf(f,"knl_fm_patch_%zu",i);
-			if (i < fm_patches-1) fputc(',',f);
-		}
-		
-		/***** actual data *****/
-		for (size_t i = 0; i < fm_patches; i++)
-		{
-			fm_patch_t *p = &fm_patch_tbl[i];
-			fprintf(f,"\nknl_fm_patch_%zu: db ",i);
-			
-			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg30[0],p->reg30[1],p->reg30[2],p->reg30[3]);
-			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg40[0],p->reg40[1],p->reg40[2],p->reg40[3]);
-			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg50[0],p->reg50[1],p->reg50[2],p->reg50[3]);
-			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg60[0],p->reg60[1],p->reg60[2],p->reg60[3]);
-			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg70[0],p->reg70[1],p->reg70[2],p->reg70[3]);
-			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg80[0],p->reg80[1],p->reg80[2],p->reg80[3]);
-			fprintf(f,"$%02X,$%02X,$%02X,$%02X, ", p->reg90[0],p->reg90[1],p->reg90[2],p->reg90[3]);
-			
-			fprintf(f,"$%02X, $%02X", p->regb0,p->regb4);
 		}
 	}
 	
@@ -1993,7 +2007,7 @@ int main(int argc, char *argv[])
 			if (i < samples-1) fputc(',',f);
 		}
 		
-		/***** actual datas *****/
+		/***** actual data *****/
 		for (size_t i = 0; i < samples; i++)
 		{
 			sample_t *s = &sample_tbl[i];

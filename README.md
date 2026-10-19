@@ -42,7 +42,7 @@ KNL_WLAZ80 := ./tools/wla/wla-z80.exe
 KNL_WLALINK := ./tools/wla/wlalink.exe
 ```
 
-Especially notable is the `KNL_BASE_INTERVAL` variable. This value allows you to change how often the VGM data is processed, in 44100Hz-sample units. If your music uses odd refresh rates, or is designed for PAL, it's worth finding the value that makes your music sound the best. Just keep in mind, the lower the value, the more time will be spent processing, so samples will sound worse. The default is 368, or about 120Hz.
+Especially notable is the `KNL_BASE_INTERVAL` variable. This value allows you to change how often the VGM data is processed, in 44100Hz-sample units. If your music uses odd refresh rates, or is designed for PAL, it's worth finding the value that makes your music sound the best. Just keep in mind, the lower the value, the more time will be spent processing, so samples will sound worse. The default is 735, or 60Hz.
 
 ## Using the KokonoePlayer-Lite functions
 

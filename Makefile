@@ -13,7 +13,8 @@ ifndef KNL_VGMS
 $(error KNL_VGMS not defined)
 endif
 
-KNL_BASE_INTERVAL ?= 368
+KNL_BASE_INTERVAL ?= 735
+KNL_CONVERT_OPTS ?=
 
 
 
@@ -81,7 +82,7 @@ knl-clean:
 ## rules
 
 $(KNL_OUT_MODULE): $(KNL_OUT_CONVERT) $(KNL_VGMS)
-	$(KNL_OUT_CONVERT) $(KNL_OUT_MODULE) $(KNL_VGMS)
+	$(KNL_OUT_CONVERT) $(KNL_CONVERT_OPTS) --base-interval $(KNL_BASE_INTERVAL) -o $(KNL_OUT_MODULE) -- $(KNL_VGMS)
 
 
 $(KNL_OUT_CONVERT): $(KNL_CONVERT)
