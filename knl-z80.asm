@@ -22,1621 +22,1537 @@ banks 1
 .define PSG $7f11
 
 
-.define CALL_NEST_LIMIT 32
-.define STACK_POINTER $1ec0
-
-
 
 
 ;value is calculated so the timer overflows at 44100/BASE_INTERVAL hz
-.define TIMER_VALUE ($400 - ((1.0 / 0.00001877) / (44100.0 / KNL_BASE_INTERVAL)))
+.define TIMER_A_VALUE ($400 - ((1.0 / 0.00001877) / (44100.0 / KNL_BASE_INTERVAL)))
 
 
 .define NTSC_INTERVAL 735
 .define PAL_INTERVAL 882
 
 
-;;;;;;;;;;;;;;;;;;;; ram structs
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; ram layout
+
+.define STACK_POINTER $1ef8
+
+.define CALL_STACK_DIST 32
+
+.define FM_PATCH_DIST 32
 
 
-;;;; song slot
+;;;;;; channel struct
+
+.define CHN_DIST $10
+.define CHN_SHIFT 4
+
+.struct chn
+	timer	db
+	ptr	dw
+	bank	db
+	stack_ptr	dw
+	stack_index	db
+	.union
+		keyon	db
+	.nextu
+		volume	db
+	.endu
+	pitch	dw
+	patch_ptr	dw	;only used on fm channels
+.endst
+
+.assert _sizeof_chn <= CHN_DIST, LDERROR, "chn struct is too long"
+
+
+;;;;;; song slot struct
+
+.define SS_DIST $10
+.define SS_SHIFT 4
+
+.define SS_CHANNELS 10
+.define SS_FM_CHANNELS 6
+.define SS_PSG_CHANNELS 4
+.define SS_CHANNELS_DIST SS_CHANNELS*CHN_DIST
+
+.define FIRST_FM_CHANNEL 0
+.define FIRST_PSG_CHANNEL 6
+.define FM_CHN3	2
+.define FM_DAC_CHANNEL 5
+.define PSG_CHANNEL_2 8
+.define PSG_NOISE_CHANNEL 9
+
 .define SS_FLAG_ON 7
-.define SS_FLAG_CHN3 6
-.define SS_FLAG_DAC 5
+.define SS_FLAG_DAC 6
+.define SS_FLAG_EXT_CHN3 5
 
-.enum 0
-ss_flags db ;(lower 4 bits are LFO)
-ss_timer dw
+.struct ss
+	flags	db
+	channels_ptr	dw
+	lfo	db
+	chn3_freqs	dsw 3
+	sample_freq	dw
+.endst
 
-ss_fm_keyon dsb 6
-ss_fm_patch_lo dsb 6
-ss_fm_patch_hi dsb 6
+.assert _sizeof_ss <= SS_DIST, LDERROR, "ss struct is too long"
 
-ss_psg_volume dsb 4
 
-ss_fm_pitch_lo dsb 6
-ss_chn3_pitch_lo dsb 3
-ss_psg_pitch_lo dsb 4
-ss_fm_pitch_hi dsb 6
-ss_chn3_pitch_hi dsb 3
-ss_psg_pitch_hi dsb 3 ;only 3! noise doesn't need a high byte
+;;;;;;; 68k communication variables
 
-ss_sample_freq dw
+.enum STACK_POINTER
+	m68k_command_buf_end_index	db
 
-ss_call_stack_index	db
-ss_call_stack dsb CALL_NEST_LIMIT*3
-
-ss_loop_restore	dsb 0	;song slot state is saved here on a loop command
+	m68k_song_tbl_base	dl
+	m68k_sample_tbl_base	dl
 .ende
 
-
-.define ss_size ss_call_stack+3
-.define k_song_slots $0900
+.define m68k_command_buf $1f00
 
 
+;;;;;;;
 
+	; note: the entire global variables/song slots must be contained in one page
+	; the individual other structs should not cross pages, but the total area can
 
+.function align(addr, align) floor(((addr)+(align-1))/align)*align
 
-;;;;;;;;;;;;;;;;; private global variables
-.enum $1ec0
-k_temp dsb 4
-k_comm_index db
+.define RAM_BASE $0820
 
-k_chn3_state db
+.enum RAM_BASE
+	m68k_command_buf_index	db
 
-k_song_slot db
-k_song_slot_ptr dw
+	cur_song_slot_id	db
+	cur_channel_id	db
+	cur_channel_in_control	db	;0=in control, >0=cannot take over, <0=can take over
 
-k_fm_channel db
+	fm_channel_offset	db
 
-;;;;
+	channel_ss	dsb SS_CHANNELS	;song slot in control of each channel
+	lfo_ss	db	;song slot in control of lfo
 
-k_fm_channel_ss dsb 6 ;song slot currently in control of each channel ($ff = none)
+	psg_noise_mode	db
 
-k_psg_channel_ss dsb 4
-
-k_lfo_ss db
-
-k_prv_psg_noise db
-
-k_sample_init_flag db
-k_sample_init_id db
-
-;;;;
-
-k_sample_active db ;bit 7 = active, bit 6 = loop
-k_sample_start dsb 3
-k_sample_accum db
-k_sample_ptr dsb 3
-k_sample_freq dw
-
+	sample_init_flag	db
+	sample_init_id	db
+	sample_flags	db
+	sample_start	dsb 3
+	sample_accum	db
+	sample_ptr	dsb 3
 .ende
 
+.define song_slots_base	align(RAM_BASE+$20, SS_DIST)
+.define channels_base	align(song_slots_base+(KNL_SONG_SLOTS*SS_DIST), CHN_DIST)
+.define call_stacks_base	align(channels_base+(KNL_SONG_SLOTS*SS_CHANNELS_DIST), CALL_STACK_DIST)
+.define fm_patches_base	align(call_stacks_base+(KNL_SONG_SLOTS*SS_CHANNELS*CALL_STACK_DIST), FM_PATCH_DIST)
 
 
 
-;;;;;;;;;;;;;;;; 68k-z80 communication variables
-
-.enum $1ef0
-comm_end_index db
-
-;68k bus pointers
-song_tbl_base dsb 3
-fm_patch_tbl_base dsb 3
-sample_tbl_base dsb 3
-
-.ende
-
-.define comm_buf $1f00
+.define cur_bank set_bank+1
 
 
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; reset handler/rst routines
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; macros
 
 
-	;reset stub
+
+	.macro step_hl
+		inc l
+		call z,step_banked_hl
+	.endm
+
+	.macro step_de
+		inc e
+		.db $28,$ff	;conditional rst 38 when z
+	.endm
+
+
+
+	.macro wait_fm_ready_hl isolated
+-:
+	bit 7,(hl)
+	jr nz,-
+	.endm
+
+
+
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; rst-area
+
 	.orga 0
+reset:
 	di
 	ld sp,STACK_POINTER
-	ld a,$ff
-	jr reset
-	
-	
-	
-	
-	;write byte a to ym register b
-	;(assumes hl' is $4000, bc' is the register and de' is the data)
-	.orga $8
-fm_write:
-	ex af,af'
-	ld a,b
+
+	xor a
+	call set_bank@always
+
+	call reset_sound
+
+	ld hl,FM1REG
+	ld d,h
+	ld e,<FM1DATA
+
+	ld (hl),$24
+	ld a,TIMER_A_VALUE>>2
+	ld (de),a
+	wait_fm_ready_hl
+	ld (hl),$25
+	ld a,TIMER_A_VALUE&3
+	ld (de),a
+
+main_loop:
+	call wait_timer
+	call handle_m68k_command_buf
+	call play_sound
+	jr main_loop
+
+
+
+	; step banked pointer in hl after l-overflow
+step_banked_hl:
+	inc h
+	ret nz
+	ld h,$80
+	jp next_bank
+
+
+
+
+	.orga $38
+	; step banked pointer in de after e-overflow
+step_banked_de:
+	inc d
+	ret nz
+	ld d,$80
+next_bank:
+	push af
+	ld a,(cur_bank)
+	inc a
+	call set_bank@always
+	pop af
+	ret
+
+
+
+
+
+
+
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; misc subroutines
+
+	; set m68k bank id to A
+set_bank:
+	cp 0
+	ret z
+@always:
+	ld (cur_bank),a
+	push hl
+	ld hl,BANK
+	.rept 7
+		ld (hl),a
+		rrca
+	.endr
+	ld (hl),a
+	ld (hl),0
+	pop hl
+	ret
+
+
+
+
+
+
+set_song_slot:
+	ld (cur_song_slot_id),a
+	.rept SS_SHIFT
+		rlca
+	.endr
+	add a,<song_slots_base
+	ld ixl,a
+	ld ixh,>song_slots_base
+	ret
+
+
+
+
+
+get_channel_fm_regs
 	exx
+	ld hl,FM1REG
+	ld b,h
+	ld c,l
+	ld d,h
+	ld e,<FM1DATA
+	cp 3
+	jr c,+
+	sub 3
+	ld c,<FM2REG
+	ld e,<FM2DATA
++:
+	ld (fm_channel_offset),a
+	exx
+	ret
+
+
+
+
+
+
+mute_fm_channel
+	ld a,(fm_channel_offset)
+	exx
+	ex af,af'
+	ld a,$ff
+	ex af,af'
+
+	;; set tl
+	add a,$40
+	.rept 3
+		wait_fm_ready_hl
+		ld (bc),a
+		ex af,af'
+		ld (de),a
+		ex af,af'
+		add a,4
+	.endr
+	wait_fm_ready_hl
 	ld (bc),a
-	
--:	bit 7,(hl)
-	jr nz,-
-	
+	ex af,af'
+	ld (de),a
+
+	;; set rr
+	ex af,af'
+	add a,$80-$4c
+	.rept 3
+		wait_fm_ready_hl
+		ld (bc),a
+		ex af,af'
+		ld (de),a
+		ex af,af'
+		add a,4
+	.endr
+	wait_fm_ready_hl
+	ld (bc),a
+	ex af,af'
+	ld (de),a
+
+	;; key off
+	ld a,(cur_channel_id)
+	cp 3
+	jr c,+
+	inc a
++:
+	wait_fm_ready_hl
+	ld (hl),$28
+	ld (FM1DATA),a
+
+	;; if dac channel then stop sample
+	ld a,(cur_channel_id)
+	sub FM_DAC_CHANNEL
+	jr nz,+
+	ld (sample_flags),a
+	wait_fm_ready_hl
+	ld (hl),$2b
+	ld (de),a
++:
+	exx
+	ret
+
+
+
+
+
+
+set_fm_channel_keyon
+	ld a,(iy+chn.keyon)
+	rlca
+	rlca
+	rlca
+	rlca
+	ld b,a
+
+	ld a,(cur_channel_id)
+	cp 3
+	jr c,+
+	inc a
++:
+	or a,b
+	exx
+	wait_fm_ready_hl
+	ld (hl),$28
+	ld (FM1DATA),a
+	exx
+	ret
+
+set_psg_channel_volume
+	ld a,(cur_channel_id)
+	sub FIRST_PSG_CHANNEL
+@no_sub:
+	rrca
+	rrca
+	rrca
+	or a,$90
+	ld b,a
+
+	ld a,(iy+chn.volume)
+	cpl
+	and a,$0f
+	or a,b
+	ld (PSG),a
+	ret
+
+
+
+
+
+set_fm_channel_pitch
+	exx
+	ld a,(iy+chn.pitch+1)
+	ex af,af'
+	ld a,(fm_channel_offset)
+	add a,$a4
+	wait_fm_ready_hl
+	ld (bc),a
+	ex af,af'
+	ld (de),a
+	ld a,(iy+chn.pitch+0)
+	ex af,af'
+	sub 4
+	wait_fm_ready_hl
+	ld (bc),a
 	ex af,af'
 	ld (de),a
 	exx
 	ret
-	
+
+set_psg_channel_pitch
+	ld a,(cur_channel_id)
+	cp PSG_NOISE_CHANNEL
+	jr z,set_psg_noise_pitch
+	sub FIRST_PSG_CHANNEL
+@no_sub:
+	rrca
+	rrca
+	rrca
+	or a,$80
+	ld b,a
+	ld a,(iy+chn.pitch+0)
+	ld c,a
+	and a,$0f
+	or b
+	ld (PSG),a
+
+	ld a,(iy+chn.pitch+1)
+	.rept 4
+		sla c
+		rla
+	.endr
+	ld (PSG),a
+	ret
+
+set_psg_noise_pitch
+	ld a,(psg_noise_mode)
+	ld b,a
+	ld a,(iy+chn.pitch)
+	or a,$e0
+	cp b
+	ret z
+	ld (psg_noise_mode),a
+	ld (PSG),a
+	ret
 
 
 
-	;write byte a to fm reg b, part 1
-	;assumes hl' is $4000
-	.orga $18
-fm_write_1:
-	ex af,af'
-	ld a,b
-	exx
+
+
+
+
+
+
+
+take_over_fm_channel
+	call mute_fm_channel
+
+	ld a,(cur_channel_id)	;ok, begin takeover
+	add a,<channel_ss
+	ld l,a
+	ld h,>channel_ss
+	ld a,(cur_song_slot_id)
 	ld (hl),a
-	
--:	bit 7,(hl)
-	jr nz,-
-	
+
+	xor a
+	ld (cur_channel_in_control),a
+
+	ld l,(iy+chn.patch_ptr+0)	;refresh patch
+	ld h,(iy+chn.patch_ptr+1)
+	ld a,(hl)
 	ex af,af'
+	ld a,(fm_channel_offset)
+	add a,$30
+@@@patch_loop:
+	exx
+	wait_fm_ready_hl
+	ld (bc),a
+	ex af,af'
+	ld (de),a
+	exx
+	inc l
+	ld a,(hl)
+	ex af,af'
+	add a,$04
+	cp a,$a0
+	jr c,@@@patch_loop
+	add a,$10
+	exx
+	wait_fm_ready_hl
+	ld (bc),a
+	ex af,af'
+	ld (de),a
+	exx
+	inc l
+	ld a,(hl)
+	ex af,af'
+	add a,$04
+	exx
+	wait_fm_ready_hl
+	ld (bc),a
+	ex af,af'
+	ld (de),a
+	exx
+
+	ld a,(cur_channel_id)
+	cp FM_DAC_CHANNEL
+	call z,set_fm_dac_mode
+
+	call set_fm_channel_pitch	;refresh other
+	jp set_fm_channel_keyon
+
+
+
+
+set_fm_dac_mode:
+	ld a,(ix+ss.flags)
+	and 1<<SS_FLAG_DAC
+	.rept 7-SS_FLAG_DAC
+		rlca
+	.endr
+	ld hl,FM1REG
+	wait_fm_ready_hl
+	ld (hl),$2b
+	ld (FM1DATA),a
+	ret
+
+
+
+
+
+
+
+
+
+
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; timer wait routine/sample player
+
+
+
+
+
+wait_timer:
+	ld hl,FM1REG
+
+	; acknowledge timer (and set chn3 state)
+	ld b,$15
+	ld a,(channel_ss+FM_CHN3)
+	or a
+	jp m,@set_timer_ack
+	.rept SS_SHIFT
+		rlca
+	.endr
+	add a,<song_slots_base+ss.flags
+	ld e,a
+	ld d,>song_slots_base
+	ld a,(de)
+	and a,1<<SS_FLAG_EXT_CHN3
+	jr z,@set_timer_ack
+	ld b,$55
+@set_timer_ack:
+	ld a,b
+	wait_fm_ready_hl
+	ld (hl),$27
+	ld (FM1DATA),a
+
+	ld d,h
+	ld e,<FM1DATA
+	exx
+
+	; check for sample init
+	ld hl,sample_init_flag
+	ld a,(hl)
+	or a
+	jr z,@no_sample_init
+	ld (hl),0	;reset init flag
+
+	inc l	;get sample id
+	ld e,(hl)
+	ld d,0
+
+	inc l	;set play flags
+	ld (hl),a
+
+	ex de,hl	;get sample table pointer
+	add hl,hl
+	add hl,hl
+	inc hl
+	ld de,(m68k_sample_tbl_base+0)
+	ld a,(m68k_sample_tbl_base+2)
+	add hl,de
+	jr nc,+
+	set 7,h
+	inc a
++:
+	call set_bank
+
+	ld a,(hl)	;get sample base
+	step_hl
+	ld d,(hl)
+	step_hl
+	ld e,(hl)
+	sla d
+	rla
+	scf
+	rr d
+	ld hl,sample_start
+	ld (hl),e
+	inc l
+	ld (hl),d
 	inc l
 	ld (hl),a
-	dec l
+	inc l
+	ld (hl),0
+	inc l
+	ld (hl),e
+	inc l
+	ld (hl),d
+	inc l
+	ld (hl),a
+
+@no_sample_init:
+	ld a,(sample_flags)
+	or a
+	jr z,@not_playing_sample
+
+	; sample playing, begin sample loop
+@playing_sample:
 	exx
-	ret
-	
-	
-	
-	
-	
-	;read byte from banked pointer chl into a then step pointer
-	.orga $30
-get_byte:
+	wait_fm_ready_hl	;set dac register
+	ld (hl),$2a
+	exx
+
+	ld a,(channel_ss+FM_DAC_CHANNEL)	;get freq
+	rlca
+	rlca
+	rlca
+	rlca
+	add a,(<song_slots_base)+ss.sample_freq
+	ld l,a
+	ld h,>song_slots_base
+	ld c,(hl)
+	inc l
+	ld e,(hl)
+	ld d,0
+
+	ld a,(sample_ptr+2)
+	call set_bank
+	ld hl,sample_accum	;get pointer
+	ld b,(hl)
+	inc l
 	ld a,(hl)
 	inc l
-	ret nz
-	inc h
-	ret nz
-	ld h,$80
-	inc c
-	;now we are at $38, another good rst location
-	;sets bank to c
-set_bank:
-	push af
-	ld a,c
-@cur_bank:
-	cp 0
-	jr z,@skip
-	ld (@cur_bank+1),a
-	push hl
-	ld hl,BANK
-	ld (hl),a
-	rrca
-	ld (hl),a
-	rrca
-	ld (hl),a
-	rrca
-	ld (hl),a
-	rrca
-	ld (hl),a
-	rrca
-	ld (hl),a
-	rrca
-	ld (hl),a
-	rrca
-	ld (hl),a
-	ld (hl),0
-	pop hl
-@skip:
-	pop af
-	ret
-	
-	
-	
-	
-	
-	
-	
-	
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; reset
-	
-reset:
-	
-	ld hl,PSG
-	ld (hl),$9f
-	ld (hl),$bf
-	ld (hl),$df
-	;ld a,$ff
-	ld (hl),a
+	ld h,(hl)
+	ld l,a
 
-	
-	
-	; ram has already been zeroed by the 68k, so only init nonzero ones
-	ld hl,k_fm_channel_ss
-	ld b,6
--:
-	ld (hl),a
-	inc hl
-	djnz -
-	
-	ld (k_prv_psg_noise),a
-	
-	
-	; reset bank
-	xor a
-	ld hl,BANK
-	.rept 9
-	ld (hl),a
-	.endr
-	
-	
-	
-	
-	
-	
-	
-	
-	exx
-	ld hl,$4000
-	exx
-	
-	ld a,TIMER_VALUE >> 2
-	ld b,$24
-	rst fm_write_1
-	ld a,TIMER_VALUE & 3
-	inc b
-	rst fm_write_1
-	
-	ld a,$15
-	ld b,$27
-	rst fm_write_1
-	
-	
-	
-	
-	
-	
-main_loop:
-	
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; idle/sample loop
-	ld hl,$4000
-@check_frame_again:
-	bit 0,(hl)
-	jr nz,@do_frame
-	
-	ld a,(k_sample_active)
-	or a
-	jr z,@check_frame_again
-	
-	;get ready for sample playback
-	ld a,$2a
-	ld ($4000),a
-	
-	ld a,(k_sample_accum)
-	ld b,a
-	ld hl,(k_sample_ptr+0)
-	ld a,(k_sample_ptr+2)
-	ld c,a
-	rst set_bank
-	
-	ld a,(k_sample_freq+1)
-	ld e,a
-	ld d,0
-	jr @sample_main_loop
-	
-	
-@sample_end:
-	ld hl,k_sample_active
+@sample_loop:	;begin main loop
+	ld a,(hl)	;7
+	or a	;4
+	jr z,@sample_over	;7
+	exx	;4
+	bit 0,(hl)	;12
+	jr nz,@sample_done	;7
+	ld (de),a	;7
+	exx	;4
+	ld a,b	;4
+	add a,c	;4
+	ld b,a	;4
+	adc hl,de	;15
+	jr nc,@sample_loop	;12
+@sample_step_bank:
+	set 7,h
+	ld a,(cur_bank)
+	inc a
+	call set_bank@always
+	jr @sample_loop
+
+@sample_over:
+	ld hl,sample_flags
 	bit 6,(hl)
-	jr nz,@loop_sample
-	
+	jr z,@stop_sample
+	ld b,0
+	ld hl,(sample_start+0)
+	ld a,(sample_start+2)
+	call set_bank
+	jr @sample_loop
+
+@sample_done:
+	exx
+	ld a,b
+	ld (sample_accum),a
+	ld (sample_ptr+0),hl
+	ld a,(cur_bank)
+	ld (sample_ptr+2),a
+	ret
+
 @stop_sample:
 	ld (hl),0
-	jr main_loop
-	
-@loop_sample:
-	
-	ld b,0
-	ld hl,(k_sample_start+0)
-	ld a,(k_sample_start+2)
-	ld c,a
-	rst set_bank
-	
-@sample_main_loop:
-	ld a,(hl)
-	or a
-	jr z,@sample_end
-	ld ($4001),a
-	
-	ld a,(k_sample_freq)
-	add b
-	ld b,a
-	adc hl,de
-	jp nc,+
-	set 7,h
-	inc c
-	rst set_bank
-+:
-	
-	ld a,($4000)
-	rrca
-	jp nc,@sample_main_loop
-	
-	;;; save sample state
-	
-	ld a,b
-	ld (k_sample_accum),a
-	ld (k_sample_ptr+0),hl
-	ld a,c
-	ld (k_sample_ptr+2),a
-	
-	
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; frame hit, handle comms and play music
-	
-@do_frame:
-	
-	
+
+	; no sample, just wait for timer
+@not_playing_sample:
 	exx
-	ld hl,$4000
-	exx
-	
-	ld a,(k_chn3_state)
-	or $15
-	ld b,$27
-	rst fm_write_1
-	
-	
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; comms
-	
-	ld a,(k_comm_index)
-	ld c,a
-	ld a,(comm_end_index)
-	cp c
-	jp z,@after_comms
-	ld b,>comm_buf
-	
-@comm_loop:
+-:
+	bit 0,(hl)
+	jr z,-
+
+	ret
+
+
+
+
+
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; m68k command handler
+
+handle_m68k_command_buf:
+	ld hl,m68k_command_buf_index
+	ld b,>m68k_command_buf
+	ld c,(hl)
+	jp @entry
+
+	;; main command loop
+@loop:
 	ld a,(bc)
 	inc c
-	ld e,a
-	ld d,0
-	ld hl,@@tbl
-	add hl,de
+	add a,<@cmd_tbl
+	ld l,a
+	adc a,>@cmd_tbl
+	sub l
+	ld h,a
 	ld e,(hl)
 	inc hl
 	ld d,(hl)
 	ex de,hl
 	jp hl
-	
-@@tbl:
-	.dw @@init
-	.dw @@stop
-	.dw @@pause
-	.dw @@resume
-	
-	;;;;;;;;;;;;;;;;;;; cmd $00 init song: byte - song slot, word - song id
-@@init:
-	ld a,(bc)
+
+@cmd_tbl:
+	.dw @cmd_init,@cmd_pause,@cmd_resume
+
+
+	;;;; $00 init song - byte song slot id, word song id
+
+@cmd_init:
+	ld a,(bc)	;get song slot pointer
 	inc c
 	call set_song_slot
-	
-	ld a,(bc)
-	ld e,a
+
+	;; init song slot variables
+	ld (ix+ss.flags),1<<SS_FLAG_ON
+	ld (ix+ss.lfo),0
+
+	;; get song header pointer
+	ld a,(bc)	;song id
 	inc c
-	ld a,(bc)
-	ld d,a
-	inc c
-	push bc
-	
-	ld hl,(song_tbl_base)
-	ld a,(song_tbl_base+2)
-	call indexed_read_68k_ptr
-	
-	ld (ix+ss_flags),$80
-	ld (ix+ss_call_stack_index),ss_call_stack
-	ld (ix+ss_call_stack+0),l
-	ld (ix+ss_call_stack+1),h
-	ld (ix+ss_call_stack+2),c
-	
-	ld d,ixh
-	ld e,ss_timer
-	ld b,ss_call_stack_index-ss_timer
-	xor a
--:
-	ld (de),a
-	inc e
-	djnz -
-	
-	ld e,ss_loop_restore
-	ld (de),a
-	
-	;this song slot may already have occupied channels, so reset it to a regular state
-	call give_up_channels
-	
-	pop bc
-	jr @next_comm
-	
-	
-	;;;;;;;;;;;;;;;;;; cmd $02 stop song slot: byte - song slot
-@@stop:
-	ld a,(bc)
-	inc c
-	push bc
-	call stop_song_slot
-	pop bc
-	jr @next_comm
-	
-	
-	
-	
-	;;;;;;;;;;;;;;;; cmd $04 pause song slot: byte - song slot
-@@pause:
-	ld a,(bc)
-	inc c
-	push bc
-	call set_song_slot
-	call pause_current_song_slot
-	pop bc
-	jr @next_comm
-	
-	
-	
-	
-	;;;;;;;;;;;;;;;; cmd $06 resume song slot: byte - song slot
-@@resume:
-	ld a,(bc)
-	inc c
-	push bc
-	call set_song_slot
-	
-	ld a,(ix+ss_call_stack_index)
-	or a
-	jr z,+
-	set SS_FLAG_ON,(ix+ss_flags)
-	
-+:
-	pop bc
-	jr @next_comm
-	
-	
-
-	
-	
-	;;;;;;;;;;;;;;;;;;; next command
-@next_comm:
-	ld a,(comm_end_index)
-	cp c
-	jp nz,@comm_loop
-	ld (k_comm_index),a
-	
-@after_comms:
-
-
-
-
-
-
-
-
-
-
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; play routine
-	
-play:
-	
-	ld hl,k_psg_channel_ss
-	ld a,$ff
-	ld (hl),a
-	inc hl
-	ld (hl),a
-	inc hl
-	ld (hl),a
-	inc hl
-	ld (hl),a
-	
-	ld (k_lfo_ss),a
-	
-	
-	
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; main song slot loop
-	
-	ld a,KNL_SONG_SLOTS-1
-	ld ix,k_song_slots+((KNL_SONG_SLOTS-1)*256)
-	
-@song_slot_loop:
-	ld (k_song_slot),a
-	ld (k_song_slot_ptr),ix
-	
-	bit 7,(ix+ss_flags)
-	jp z,@@next_song_slot
-	
-	ld a,(ix+ss_timer+0)
-	sub <KNL_BASE_INTERVAL
-	ld (ix+ss_timer+0),a
-	ld a,(ix+ss_timer+1)
-	sbc >KNL_BASE_INTERVAL
-	ld (ix+ss_timer+1),a
-	jp nc,@@no_vgm_data_read
-	
-	
-	;;;;;;;;;;;;;;;;;;;;;;; read vgm data
-	xor a
-	ld (k_sample_init_flag),a
-	
-@@vgm_data_read_again:
-	ld d,ixh
-	ld e,(ix+ss_call_stack_index)
-	ld a,(de)
 	ld l,a
-	inc e
-	ld a,(de)
+	ld a,(bc)
+	inc c
 	ld h,a
-	inc e
-	ld a,(de)
-	ld c,a
-@@vgm_data_read_loop_bank:
-	rst set_bank
-	
-@@vgm_data_read_loop:
-	rst get_byte
-	cp $60
-	jp c,@@@fm_channel
-	cp $6c
-	jr c,@@@misc_command
-	cp $70
-	jr c,@@@psg_freq_lo
-	cp $80
-	jr c,@@@psg_freq_hi
-	cp $c0
-	jr c,@@@psg_volume
-	
-	
-	;;;;;;;;;;;;;; $c0-$ff
-@@@wait_frames:
-	push hl
-	ld de,frame_timer_tbl
-	and $3f
-	rlca
-	ld l,a
-	ld h,0
-	add hl,de
-	ld e,(hl)
+	push bc
+
+	add hl,hl
+	add hl,hl
 	inc hl
-	ld d,(hl)
-	pop hl
-	jp @@after_vgm_data_read
-	
-	
-	
-	;;;;;;;;;;;;; $80-$bf
-@@@psg_volume:
-	ld b,a
-	rrca
-	rrca
-	rrca
-	rrca
-	and 3
-	call iy_equals_ix_plus_a
-	ld a,b
-	and $0f
-	ld (iy+ss_psg_volume),a
-	jp @@vgm_data_read_loop
-	
-	
-	;;;;;;;;;;;;; $7x
-@@@psg_freq_hi:
-	ld b,a
-	rrca
-	rrca
-	and 3
-	cp 3
-	jr z,@@@@noise
-	call iy_equals_ix_plus_a
-	ld a,b
-	and 3
-	ld (iy+ss_psg_pitch_hi),a
-	jp @@vgm_data_read_loop
-	
-@@@@noise:
-	ld a,(ix+ss_psg_pitch_lo+3)
-	and $fc
-	ld e,a
-	ld a,b
-	and 3
-	or e
-	ld (ix+ss_psg_pitch_lo+3),a
-	jp @@vgm_data_read_loop
-	
-	
-	;;;;;;;;;;;;; $6c-$6f
-@@@psg_freq_lo:
-	and 3
-	call iy_equals_ix_plus_a
-	rst get_byte
-	ld (iy+ss_psg_pitch_lo),a
-	jp @@vgm_data_read_loop
-	
-	
-	;;;;;;;;;;;;; $60-$6b
-@@@misc_command:
-	push hl
-	ld hl,@@@@tbl
-	and $f
-	rlca
-	ld e,a
-	ld d,0
+	ld de,(m68k_song_tbl_base+0)
+	ld a,(m68k_song_tbl_base+2)
 	add hl,de
-	ld e,(hl)
-	inc hl
-	ld d,(hl)
-	pop hl
-	push de
-	ret
-	
-@@@@tbl:
-	.dw @@@@chn3
-	.dw @@@@dac
-	.dw @@@@lfo
-	.dw @@@@sample_freq
-	.dw @@@@sample_start
-	.dw @@@@sample_loop
-	.dw @@@@sample_stop
-	.dw @@@@jump
-	.dw @@@@call
-	.dw @@@@set_loop
-	.dw @@@@return
-	.dw @@@@wait
-	
-@@@@chn3:
-	rst get_byte
-	or a
-	jr nz,@@@@chn3_extd
-@@@@chn3_normal:
-	res SS_FLAG_CHN3,(ix+ss_flags)
-	jp @@vgm_data_read_loop
-@@@@chn3_extd:
-	set SS_FLAG_CHN3,(ix+ss_flags)
-	jp @@vgm_data_read_loop
-	
-@@@@dac:
-	rst get_byte
-	or a
-	jr nz,@@@@dac_enable
-@@@@dac_disable:
-	res SS_FLAG_DAC,(ix+ss_flags)
-	jp @@vgm_data_read_loop
-@@@@dac_enable:
-	set SS_FLAG_DAC,(ix+ss_flags)
-	jp @@vgm_data_read_loop
-	
-@@@@lfo:
-	rst get_byte
-	ld b,a
-	ld a,(ix+ss_flags)
-	and $f0
-	or b
-	ld (ix+ss_flags),a
-	jp @@vgm_data_read_loop
-	
-@@@@sample_freq:
-	rst get_byte
-	ld (ix+ss_sample_freq+0),a
-	rst get_byte
-	ld (ix+ss_sample_freq+1),a
-	jp @@vgm_data_read_loop
-	
-@@@@sample_start:
-	ld b,$80
-	jr +
-@@@@sample_loop:
-	ld b,$c0
+	jr nc,+
+	set 7,h
+	inc a
 +:
-	ld (k_sample_init_flag),a
-	
-	rst get_byte
-	ld (k_sample_init_id),a
-	
-	jp @@vgm_data_read_loop
-	
-	
-@@@@sample_stop:
-	jp @@vgm_data_read_loop
-	
-@@@@wait:
-	rst get_byte
-	ld e,a
-	rst get_byte
-	ld d,a
-	jp @@after_vgm_data_read
+	call set_bank
 
-@@@@jump:
-	rst get_byte
-	ld c,a
-	rst get_byte
-	ld d,a
-	rst get_byte
-	ld l,a
-	ld a,d
-	rlca
-	rl c
-	scf
-	rra
-	ld h,a
-	jp @@vgm_data_read_loop_bank
-
-@@@@call:
-	rst get_byte
-	ld b,a
-	rst get_byte
-	ld d,a
-	rst get_byte
-	ld e,a
-
-	push de
-	ld d,ixh
-	ld e,(ix+ss_call_stack_index)
-	ld a,l
-	ld (de),a
-	inc e
-	ld a,h
-	ld (de),a
-	inc e
-	ld a,c
-	ld (de),a
-	inc e
-	ld (ix+ss_call_stack_index),e
-	pop hl
-
-	ld a,b
-	sla h
+	ld a,(hl)	;read pointer into de
+	step_hl
+	ld d,(hl)
+	step_hl
+	ld e,(hl)
+	sla d
 	rla
 	scf
-	rr h
-	ld c,a
-	jp @@vgm_data_read_loop_bank
-	
-@@@@set_loop:
-	ld (ix+ss_call_stack+0),l	; loop command is invalid inside of subroutines so this is safe
-	ld (ix+ss_call_stack+1),h
-	ld (ix+ss_call_stack+2),c
-	
-	push hl
-	ld d,ixh
-	ld h,d
-	ld e,0
-	ld l,ss_loop_restore
-	
-	ld b,ss_size
+	rr d
+	ex de,hl
+	call set_bank
+
+	;; begin main channel loop
+	ld de,channel_ss
+	ld a,(ix+ss.channels_ptr+0)
+	ld iyl,a
+	ld a,(ix+ss.channels_ptr+1)
+	ld iyh,a
+	xor a
+@@chn_loop:
+	ld (cur_channel_id),a
+
+	ex af,af'
+	ld a,(cur_channel_id)
+	cp FIRST_PSG_CHANNEL
+	call c,get_channel_fm_regs
+	ex af,af'
+
+	cp (hl)	;if the song is using this channel then fully init it, else disable it
+	jr z,@@start_chn
+@@disable_chn:
+	xor a
+	ld (iy+chn.ptr+1),a
+
+	ld a,(cur_channel_id)
+	cp FIRST_PSG_CHANNEL
+	jr nc,@@next_chn
+
+	ex de,hl	;if we have this channel then give it up
+	ld a,(cur_song_slot_id)
+	cp (hl)
+	jr nz,@@no_give_up
+	ld (hl),$ff
+	call mute_fm_channel
+@@no_give_up:
+	ex de,hl
+
+	jr @@next_chn
+
+@@start_chn:
+	step_hl
+	xor a
+	ld (iy+chn.timer),a
+	ld (iy+chn.stack_index),a
+	ld (iy+chn.volume),a
+	ld a,(hl)
+	step_hl
+	ld b,(hl)
+	step_hl
+	ld c,(hl)
+	sla b
+	rla
+	scf
+	rr b
+	ld (iy+chn.ptr+0),c
+	ld (iy+chn.ptr+1),b
+	ld (iy+chn.bank),a
+	step_hl
+
+	ld a,(cur_channel_id)
+	cp FIRST_PSG_CHANNEL
+	jr nc,@@next_chn
+
+	ld a,(de)	;if this channel is not in use then take it over
+	or a
+	ld b,a
+	ld a,(cur_song_slot_id)
+	jp m,@@take_over_chn
+	cp b	;otherwise, take over the channel if we either already have it, or the current song slot is lower
+	jr c,@@no_take_over
+@@take_over_chn:
+	ld (de),a
+	call mute_fm_channel
+@@no_take_over:
+
+@@next_chn:
+	inc e
+	ld bc,CHN_DIST
+	add iy,bc
+	ld a,(cur_channel_id)
+	inc a
+	cp SS_CHANNELS
+	jr c,@@chn_loop
+
+	;; done
+	pop bc
+	jr @next_cmd
+
+
+	;;;; $02 pause song - byte song slot id
+
+@cmd_pause:
+	ld a,(bc)	;get song slot pointer
+	inc c
+	call set_song_slot
+
+	res SS_FLAG_ON,(ix+ss.flags)	;disable song slot
+
+	;; kill fm channels
+	ld hl,channel_ss
+	ld a,(ix+ss.channels_ptr+0)
+	ld iyl,a
+	ld a,(ix+ss.channels_ptr+1)
+	ld iyh,a
+	xor a
+@@chn_loop:
+	ld (cur_channel_id),a
+
+	call get_channel_fm_regs
+
+	ld a,(cur_song_slot_id)	;if we are in control of this channel then give it up
+	cp (hl)
+	jr nz,@@next_chn
+	ld (hl),$ff
+	call mute_fm_channel
+
+@@next_chn:
+	inc l
+	ld bc,CHN_DIST
+	add iy,bc
+	ld a,(cur_channel_id)
+	inc a
+	cp FIRST_PSG_CHANNEL
+	jr c,@@chn_loop
+
+	jr @next_cmd
+
+
+	;;;; $04 resume song - byte song slot id
+
+@cmd_resume:
+	ld a,(bc)	;get song slot pointer
+	inc c
+	call set_song_slot
+
+	set SS_FLAG_ON,(ix+ss.flags)	;enable song slot
+
+	jr @next_cmd
+
+
+	;; done!
+@entry:
+@next_cmd:
+	ld a,(m68k_command_buf_end_index)
+	cp c
+	jp nz,@loop
+	ld (m68k_command_buf_index),a
+	ret
+
+
+
+
+
+
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; player reset routine
+
+reset_sound:
+
+	;;;;;;;;;;; init ram that wasn't zeroed by the 68k
+
+	;; reset song slot assignments
+
+	ld hl,channel_ss
+	ld bc,(((lfo_ss-channel_ss)+1)<<8)|$ff
 -:
+	ld (hl),c
+	inc l
+	djnz -
+
+	;; reset song slots
+
+	ld ix,song_slots_base
+	ld de,SS_DIST
+	exx
+	ld hl,channels_base
+	ld de,SS_CHANNELS_DIST
+	ld b,KNL_SONG_SLOTS
+-:
+	ld (ix+ss.channels_ptr+0),l
+	ld (ix+ss.channels_ptr+1),h
+	add hl,de
+	exx
+	add ix,de
+	exx
+	djnz -
+
+	;; reset channels
+
+	ld ix,channels_base
+	ld hl,call_stacks_base
+	ld de,CALL_STACK_DIST
+	ld b,KNL_SONG_SLOTS
+	exx
+	ld hl,fm_patches_base
+	ld de,FM_PATCH_DIST
+	ld bc,CHN_DIST
+	exx
+--:
+	ld c,0
+-:
+	ld (ix+chn.stack_ptr+0),l
+	ld (ix+chn.stack_ptr+1),h
+	add hl,de
+	ld a,c
+	exx
+	cp FIRST_PSG_CHANNEL
+	jr nc,+
+	ld (ix+chn.patch_ptr+0),l
+	ld (ix+chn.patch_ptr+1),h
+	add hl,de
++:
+	add ix,bc
+	exx
+	inc c
+	ld a,c
+	cp SS_CHANNELS
+	jr c,-
+	djnz --
+
+	ret
+
+
+
+
+
+
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; main play routine
+
+play_sound:
+
+	ld hl,channel_ss+FIRST_PSG_CHANNEL
+	ld a,$ff
+	.rept 4
+		ld (hl),a
+		inc l
+	.endr
+	ld (hl),a
+
+	;;;;;;;;;;;;;;;;;; begin main song slot loop
+
+	ld a,KNL_SONG_SLOTS-1
+	ld ix,song_slots_base+((KNL_SONG_SLOTS-1)*SS_DIST)
+@song_slot_loop:
+	bit SS_FLAG_ON,(ix+ss.flags)
+	jp z,@next_song_slot_2
+
+	ld (cur_song_slot_id),a
+
+	;;;;;;;;; begin channel loop
+
+	ld a,(ix+ss.channels_ptr+0)
+	ld iyl,a
+	ld a,(ix+ss.channels_ptr+1)
+	ld iyh,a
+	xor a
+@chn_loop:
+	ld (cur_channel_id),a
+	ld e,a
+
+	ld a,(iy+chn.ptr+1)
+	or a
+	jp z,@next_chn
+
+	dec (iy+chn.timer)
+	jp p,@no_song_data_read
+
+	ld a,e
+	cp FIRST_PSG_CHANNEL
+	jr nc,@@no_fm_control
+
+	call get_channel_fm_regs
+
+	ld a,e
+	add a,<channel_ss
+	ld l,a
+	ld h,>channel_ss
+	ld a,(hl)
+	or a
+	jp m,+
+	ld l,<cur_song_slot_id
+	sub a,(hl)
++:
+@@no_fm_control:
+	ld (cur_channel_in_control),a
+
+	;;;;;;;; start reading music data
+
+	ld e,(iy+chn.ptr+0)
+	ld d,(iy+chn.ptr+1)
+	ld a,(iy+chn.bank)
+	call set_bank
+
+@song_data_read_loop:
+	ld a,(de)
+	step_de
+	or a
+	jp p,@song_data_read_done
+	cp $a0
+	jp c,@@fm_patch_param
+	cp $f0
+	jp nc,@@misc_cmd
+	cp $e0
+	jp nc,@@volume
+
+@@pitch_dist:
+	ld b,0
+	sub $c0
+	jr nc,+
+	dec b
++:
+	add a,(iy+chn.pitch+0)
+	ld (iy+chn.pitch+0),a
+	ld a,b
+	adc a,(iy+chn.pitch+1)
+	ld (iy+chn.pitch+1),a
+	ld a,(cur_channel_in_control)
+	or a
+	call z,set_fm_channel_pitch
+	jp @song_data_read_loop
+
+@@volume:
+	ld b,(iy+chn.volume)
+	and a,$0f
+	ld (iy+chn.volume),a
+	ld c,a
+
+	ld a,(cur_channel_id)	;for fm channels, check for takeover on keyoff->keyon
+	cp FIRST_PSG_CHANNEL
+	jp nc,@song_data_read_loop
+
+	ld a,(cur_channel_in_control)
+	or a
+	jr nz,@@check_keyon
+@@set_volume:
+	call set_fm_channel_keyon
+	jp @song_data_read_loop
+@@check_keyon:
+	ld a,b
+	cpl
+	and c
+	and $0f
+	jp z,@song_data_read_loop
+	ld a,(cur_channel_in_control)
+	or a
+	jp p,@song_data_read_loop
+	call take_over_fm_channel
+	jp @song_data_read_loop
+
+@@fm_patch_param:
+	and a,$1f
+	add a,(iy+chn.patch_ptr+0)
+	ld l,a
+	ld h,(iy+chn.patch_ptr+1)
 	ld a,(de)
 	ld (hl),a
-	inc hl
-	inc de
-	djnz -
-	
-	pop hl
-	
-	
-	jp @@vgm_data_read_loop
-	
-@@@@return:
-	ld a,(ix+ss_call_stack_index)
-	cp ss_call_stack
-	jr z,@@@@song_end
-	sub 3
-	ld (ix+ss_call_stack_index),a
-	jp @@vgm_data_read_again
-	
-@@@@song_end:
-	ld d,ixh
-	ld h,d
-	ld e,0
-	ld l,ss_loop_restore
-	
-	bit 7,(hl)
-	jr z,@@@@@stop
-	
-	ld b,ss_size
--:
-	ld a,(hl)
-	ld (de),a
-	inc hl
-	inc de
-	djnz -
-	
-	;update fm with the new state
-	ld hl,k_fm_channel_ss
-	xor a
-@@@@@reset_loop:
-	ld (k_fm_channel),a
-	ld a,(k_song_slot)
-	cp (hl)
-	jr nz,@@@@@@next
-	
-	push hl
-	ld a,(k_fm_channel)
-	call iy_equals_ix_plus_a
-	
-	call mute_fm_channel
-	call write_fm_patch ;write all sound parameters
-	call write_fm_freq
-	ld a,(k_fm_channel) ;for channel 3, initialize the aux. freqs too
-	cp 2
-	jr nz,+
-	call write_fm_3freq
-	ld hl,k_fm_channel
-	dec (hl)
-	call write_fm_3freq
-	ld hl,k_fm_channel
-	dec (hl)
-	call write_fm_3freq
-	ld a,2
-	ld (k_fm_channel),a
-+:
-	call write_fm_keyon
-	
-	pop hl
-	
-@@@@@@next:
-	inc hl
-	ld a,(k_fm_channel)
-	inc a
-	cp 6
-	jr c,@@@@@reset_loop
-	
-	
-	ld l,(ix+ss_call_stack+0)	; loop sets are not allowed inside subroutines so this is safe
-	ld h,(ix+ss_call_stack+1)
-	ld c,(ix+ss_call_stack+2)
-	jp @@vgm_data_read_loop_bank
-	
-	
-@@@@@stop:
-	call stop_current_song_slot
-	jp @@next_song_slot
-	
-	
-	
-	
-	
-	
-	
-	;;;;;;;;;;;;;; $00-$5f
-@@@fm_channel:
-	; channel in k_fm_channel, pointer in iy
-	ld b,a
-	rrca
-	rrca
-	rrca
-	rrca
-	and $0f
-	ld (k_fm_channel),a
-	call iy_equals_ix_plus_a
-	
-	; get channel song slot info
-	push hl
-	ld hl,k_fm_channel
-	ld e,(hl)
-	ld d,0
-	ld hl,k_fm_channel_ss
-	add hl,de
-	ld a,(hl) ;leave a pointer to it in hl
-	ld (k_temp),a ;currently active song slot on this channel in k_temp
-	ld (k_temp+1),hl ;pointer to it in k_temp+1
-	
-	; dispatch
-	ld a,b
-	and $0f
-	rlca
-	ld de,@@@@tbl
-	ld l,a
-	ld h,0
-	add hl,de
-	ld e,(hl)
-	inc hl
-	ld d,(hl)
-	pop hl
-	push de
-	ret
-	
-@@@@tbl:
-	.dw @@@@keyoff_all
-	.dw @@@@keyon_all
-	.dw @@@@keyon
-	.dw @@@@fm_patch_lo
-	.dw @@@@fm_patch
-	.dw @@@@freq_lo
-	.dw @@@@freq_hi
-	.dw @@@@freq
-	
-	.dw @@@@3freq_lo
-	.dw @@@@3freq_hi
-	.dw @@@@3freq
-	
-	
-	
-@@@@keyoff_all:
-	xor a
-	jr @@@@keyon_try_write
-@@@@keyon_all:
-	ld a,$f0
-	jr @@@@keyon_try_write
-@@@@keyon:
-	rst get_byte
-@@@@keyon_try_write:
-	ld d,(iy+ss_fm_keyon)
-	ld (iy+ss_fm_keyon),a
-	ld e,a
-	
-	ld a,(k_temp) ;channel is unoccupied, always take over
-	cp $ff
-	jr z,@@@@@takeover
-	ld b,a
-	ld a,(k_song_slot)
-	cp b
-	jr z,@@@@@write ;we're already in control, just set the keyon
-	jp c,@@vgm_data_read_loop ;can't take over, higher song slot is in control
-	
-	ld a,d ;if any operator was newly keyed on, take control
-	cpl
-	and e
-	jp z,@@vgm_data_read_loop
-	ld (iy+ss_fm_keyon),a ;only key on the newly keyed-on operators
-	
-@@@@@takeover:
-	push bc
-	push hl
-	ld a,(k_song_slot)
-	ld hl,(k_temp+1)
-	ld (hl),a
-	call mute_fm_channel
-	call write_fm_patch ;write all sound parameters
-	call write_fm_freq
-	ld a,(k_fm_channel) ;for channel 3, initialize the aux. freqs too
-	cp 2
-	jr nz,+
-	call write_fm_3freq
-	ld hl,k_fm_channel
-	dec (hl)
-	call write_fm_3freq
-	ld hl,k_fm_channel
-	dec (hl)
-	call write_fm_3freq
-	ld a,2
-	ld (k_fm_channel),a
-+:
-	call write_fm_keyon
-	
-	pop hl
-	pop bc
-	rst set_bank
-	jp @@vgm_data_read_loop
-	
-@@@@@write:
-	push bc
-	push hl
-	call write_fm_keyon
-	pop hl
-	pop bc
-	jp @@vgm_data_read_loop
-	
-	
-@@@@fm_patch_lo:
-	rst get_byte
-	ld (iy+ss_fm_patch_lo),a
-	ld (iy+ss_fm_patch_hi),0
-	jp @@@@fm_patch_try_write
-@@@@fm_patch:
-	rst get_byte
-	ld (iy+ss_fm_patch_lo),a
-	rst get_byte
-	ld (iy+ss_fm_patch_hi),a
-	
-@@@@fm_patch_try_write:
-	ld a,(k_temp) ;if we're not in control, give up
-	ld b,a
-	ld a,(k_song_slot)
-	cp b
-	jp nz,@@vgm_data_read_loop
-	;we are, write it
-	push bc
-	push hl
-	call write_fm_patch
-	pop hl
-	pop bc
-	rst set_bank
-	jp @@vgm_data_read_loop
-	
-	
-@@@@freq_lo:
-	rst get_byte
-	ld (iy+ss_fm_pitch_lo),a
-	jp @@@@freq_try_write
-@@@@freq:
-	rst get_byte
-	ld (iy+ss_fm_pitch_lo),a
-@@@@freq_hi:
-	rst get_byte
-	ld (iy+ss_fm_pitch_hi),a
-	
-@@@@freq_try_write:
-	ld a,(k_temp) ;if we're not in control, give up
-	ld b,a
-	ld a,(k_song_slot)
-	cp b
-	jp nz,@@vgm_data_read_loop
-	;we are, write it
-	push bc
-	push hl
-	call write_fm_freq
-	pop hl
-	pop bc
-	jp @@vgm_data_read_loop
-	
-	
-@@@@3freq_lo:
-	rst get_byte
-	ld (iy+ss_chn3_pitch_lo),a
-	jp @@@@3freq_try_write
-@@@@3freq:
-	rst get_byte
-	ld (iy+ss_chn3_pitch_lo),a
-@@@@3freq_hi:
-	rst get_byte
-	ld (iy+ss_chn3_pitch_hi),a
-	
-@@@@3freq_try_write:
-	ld a,(k_fm_channel_ss+2) ;if we're not in control, give up (channel is always 3, k_fm_channel is the operator)
-	ld b,a
-	ld a,(k_song_slot)
-	cp b
-	jp nz,@@vgm_data_read_loop
-	;we are, write it
-	push bc
-	push hl
-	call write_fm_3freq
-	pop hl
-	pop bc
-	jp @@vgm_data_read_loop
-	
-	
-	
-	
-	
-@@after_vgm_data_read:
-	;amount of time for the next event is in DE
-	
-	push de
-	ld d,ixh
-	ld e,(ix+ss_call_stack_index)
+	ex af,af'
+	step_de
+	ld a,(cur_channel_in_control)
+	or a
+	jp nz,@song_data_read_loop
 	ld a,l
-	ld (de),a
-	inc e
-	ld a,h
-	ld (de),a
-	inc e
-	ld a,c
-	ld (de),a
-	pop de
-	
-	ld l,(ix+ss_timer+0)
-	ld h,(ix+ss_timer+1)
-	add hl,de
-	ld (ix+ss_timer+0),l
-	ld (ix+ss_timer+1),h
-	jp nc,@@vgm_data_read_again  ;if the delay was less than a frame
-	
-	
-	
-	;;;;;;;;;;;; if lfo is on, control it
-	
-	ld hl,k_lfo_ss
-	ld a,(hl)
-	cp $ff
-	jr nz,@@no_lfo
-	
-	ld a,(ix+ss_flags)
-	bit 3,a
-	jr z,@@no_lfo
-	
-	exx
-	ld hl,$4000
-	exx
-	
-	ld b,$22
-	rst fm_write_1
-	
-	ld a,(k_song_slot)
-	ld (hl),a
-	
-@@no_lfo:
-	
-	
-	
-	;;;;;;;;;;;;; init sample, if needed
-	
-	ld a,(k_sample_init_flag)
-	or a
-	jr z,@@no_sample_init
-	
-	ld a,(k_song_slot)
-	ld b,a
-	
-	;first check the current state of channel 6
-	ld hl,k_fm_channel_ss+5
-	ld a,(hl)
-	cp $ff
-	jr z,@@sample_takeover ;unoccupied, take it over
-	cp b
-	jr z,@@sample_init ;already in control, init the sample
-	jr nc,@@no_sample_init ;higher channel is in control, do nothing
-	
-@@sample_takeover:
-	ld (hl),b ;signal we're in control
-	
-	ld a,5
-	ld (k_fm_channel),a
-	call iy_equals_ix_plus_a
-	
-	call mute_fm_channel
-	call write_fm_patch ;this is necessary, the patch contains some parameters that can affect the DAC output
-	call write_fm_freq
-	call write_fm_keyon
-	
-@@sample_init:
-	ld a,(k_sample_init_flag)
-	ld (k_sample_active),a
-	
-	;set up sample pointer
-	ld a,(k_sample_init_id)
-	ld e,a
-	ld d,0
-	ld hl,(sample_tbl_base)
-	ld a,(sample_tbl_base+2)
-	call indexed_read_68k_ptr
-	ld (k_sample_start+0),hl
-	ld (k_sample_ptr+0),hl
-	ld a,c
-	ld (k_sample_start+2),a
-	ld (k_sample_ptr+2),a
-	
-	
-	
-@@no_sample_init:
-	
-	
-	
-	
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;; flag psg, if needed
-@@no_vgm_data_read:
-	
-	
-	ld hl,k_song_slot
-	ld c,(hl)
-	
-	ld b,4
-	
-	ld hl,k_psg_channel_ss
-	
-	ld iy,(k_song_slot_ptr)
--:
-	bit 7,(hl)
-	jr z,+
-	ld a,(iy+ss_psg_volume)
-	or a
-	jr z,+
-	ld (hl),c
-	
+	and $1f
+	rlca
+	rlca
+	add a,$30
+	cp a,$a0
+	jr c,+
+	add a,$10
 +:
+	ld hl,fm_channel_offset
+	add a,(hl)
+	exx
+	wait_fm_ready_hl
+	ld (bc),a
+	ex af,af'
+	ld (de),a
+	exx
+	jp @song_data_read_loop
+
+@@misc_cmd:
+	and a,$0f
+	add a,a
+	add a,<@@misc_cmd_tbl
+	ld l,a
+	adc a,>@@misc_cmd_tbl
+	sub l
+	ld h,a
+	ld a,(hl)
 	inc hl
-	inc iy
-	djnz -
-	
-	
-	
-	
-	
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;; next song slot
-	
-@@next_song_slot:	
-	dec ixh
-	
-	ld a,(k_song_slot)
+	ld h,(hl)
+	ld l,a
+	jp hl
+
+@@misc_cmd_tbl:
+	.dw @@pitch,@@low_pitch,@@high_pitch
+	.dw @@chn_flag_off,@@chn_flag_on
+	.dw @@lfo
+	.dw @@chn3_pitch_1,@@chn3_pitch_2,@@chn3_pitch_3
+	.dw @@sample_freq,@@start_sample,@@start_sample_looped,@@stop_sample
+	.dw @@jump,@@call,@@return
+
+@@pitch:
+	ld a,(de)
+	ld (iy+chn.pitch+0),a
+	step_de
+@@high_pitch:
+	ld a,(de)
+	ld (iy+chn.pitch+1),a
+	step_de
+	ld a,(cur_channel_in_control)
+	or a
+	call z,set_fm_channel_pitch
+	jp @song_data_read_loop
+@@low_pitch:
+	ld a,(de)
+	ld (iy+chn.pitch+0),a
+	step_de
+	ld a,(cur_channel_in_control)
+	or a
+	call z,set_fm_channel_pitch
+	jp @song_data_read_loop
+
+@@chn_flag_off:
+	ld a,(cur_channel_id)
+	cp FM_DAC_CHANNEL
+	jr z,+
+	res SS_FLAG_EXT_CHN3,(ix+ss.flags)
+	jp @song_data_read_loop
++:
+	res SS_FLAG_DAC,(ix+ss.flags)
+	jr @@set_fm_dac_mode
+@@chn_flag_on:
+	ld a,(cur_channel_id)
+	cp FM_DAC_CHANNEL
+	jr z,+
+	set SS_FLAG_EXT_CHN3,(ix+ss.flags)
+	jp @song_data_read_loop
++:
+	set SS_FLAG_DAC,(ix+ss.flags)
+@@set_fm_dac_mode:
+	ld a,(cur_channel_in_control)
+	or a
+	call z,set_fm_dac_mode
+	jp @song_data_read_loop
+
+@@lfo:
+	ld a,(de)
+	ld (ix+ss.lfo),a
+	step_de
+	jp @song_data_read_loop
+
+@@chn3_pitch_1:
+	ld a,(de)
+	ld (ix+ss.chn3_freqs+0),a
+	step_de
+	ld a,(de)
+	ld (ix+ss.chn3_freqs+1),a
+	step_de
+	ld a,(cur_channel_in_control)
+	or a
+	jp nz,@song_data_read_loop
+	exx
+	ld a,$ac
+	wait_fm_ready_hl
+	ld (hl),a
+	ld a,(ix+ss.chn3_freqs+1)
+	ld (FM1DATA),a
+	ld a,$a8
+	wait_fm_ready_hl
+	ld (hl),a
+	ld a,(ix+ss.chn3_freqs+0)
+	ld (FM1DATA),a
+	exx
+	jp @song_data_read_loop
+@@chn3_pitch_2:
+	ld a,(de)
+	ld (ix+ss.chn3_freqs+2),a
+	step_de
+	ld a,(de)
+	ld (ix+ss.chn3_freqs+3),a
+	step_de
+	ld a,(cur_channel_in_control)
+	or a
+	jp nz,@song_data_read_loop
+	exx
+	ld a,$ad
+	wait_fm_ready_hl
+	ld (hl),a
+	ld a,(ix+ss.chn3_freqs+3)
+	ld (FM1DATA),a
+	ld a,$a9
+	wait_fm_ready_hl
+	ld (hl),a
+	ld a,(ix+ss.chn3_freqs+2)
+	ld (FM1DATA),a
+	exx
+	jp @song_data_read_loop
+@@chn3_pitch_3:
+	ld a,(de)
+	ld (ix+ss.chn3_freqs+4),a
+	step_de
+	ld a,(de)
+	ld (ix+ss.chn3_freqs+5),a
+	step_de
+	ld a,(cur_channel_in_control)
+	or a
+	jp nz,@song_data_read_loop
+	exx
+	ld a,$ae
+	wait_fm_ready_hl
+	ld (hl),a
+	ld a,(ix+ss.chn3_freqs+5)
+	ld (FM1DATA),a
+	ld a,$aa
+	wait_fm_ready_hl
+	ld (hl),a
+	ld a,(ix+ss.chn3_freqs+4)
+	ld (FM1DATA),a
+	exx
+	jp @song_data_read_loop
+
+@@sample_freq:
+	ld a,(de)
+	ld (ix+ss.sample_freq+0),a
+	step_de
+	ld a,(de)
+	ld (ix+ss.sample_freq+1),a
+	step_de
+	jp @song_data_read_loop
+@@start_sample:
+	ld a,(cur_channel_in_control)
+	or a
+	jr z,+
+	jp p,++
+	call take_over_fm_channel
++:
+	ld a,$80
+	ld (sample_init_flag),a
+	ld a,(de)
+	ld (sample_init_id),a
+++:
+	step_de
+	jp @song_data_read_loop
+@@start_sample_looped:
+	ld a,(cur_channel_in_control)
+	or a
+	jr z,+
+	jp p,++
+	call take_over_fm_channel
++:
+	ld a,$c0
+	ld (sample_init_flag),a
+	ld a,(de)
+	ld (sample_init_id),a
+++:
+	step_de
+	jp @song_data_read_loop
+@@stop_sample:
+	ld a,(cur_channel_in_control)
+	or a
+	jp nz,@song_data_read_loop
+	;xor a
+	ld (sample_flags),a
+	jp @song_data_read_loop
+
+
+@@jump:
+	ex de,hl
+	ld a,(hl)
+	step_hl
+	ld d,(hl)
+	step_hl
+	ld e,(hl)
+	sla d
+	rla
+	scf
+	rr d
+	call set_bank
+	jp @song_data_read_loop
+
+@@call:
+	ld a,(iy+chn.stack_index)
+	ld b,a
+	add 3
+	ld (iy+chn.stack_index),a
+	ld a,b
+	add a,(iy+chn.stack_ptr+0)
+	ld c,a
+	ld b,(iy+chn.stack_ptr+1)
+
+	ex de,hl
+	ld a,(hl)
+	step_hl
+	ld d,(hl)
+	step_hl
+	ld e,(hl)
+	sla d
+	rla
+	scf
+	rr d
+	ex af,af'
+
+	inc hl
+	ld a,l
+	ld (bc),a
+	inc c
+	ld a,h
+	cp $80
+	set 7,a
+	ld (bc),a
+	inc c
+	ld a,(cur_bank)
+	adc a,0
+	ld (bc),a
+
+	ex af,af'
+	call set_bank
+	jp @song_data_read_loop
+
+@@return:
+	ld a,(iy+chn.stack_index)
+	or a
+	jr z,@@stop
+	sub 3
+	ld (iy+chn.stack_index),a
+	add a,(iy+chn.stack_ptr+0)
+	ld l,a
+	ld h,(iy+chn.stack_ptr+1)
+
+	ld e,(hl)
+	inc l
+	ld d,(hl)
+	inc l
+	ld a,(hl)
+	call set_bank
+	jp @song_data_read_loop
+
+@@stop:
+	ld (iy+chn.ptr+1),0
+	ld a,(cur_channel_in_control)	;if we have the channel then give it up
+	or a
+	jp nz,@next_chn
+	ld a,(cur_channel_id)
+	add a,<channel_ss
+	ld l,a
+	ld h,>channel_ss
+	ld (hl),$ff
+	call mute_fm_channel
+	jp @next_chn
+
+
+	;;;; done
+@song_data_read_done:
+	ld (iy+chn.timer),a
+	ld (iy+chn.ptr+0),e
+	ld (iy+chn.ptr+1),d
+	ld a,(cur_bank)
+	ld (iy+chn.bank),a
+
+	;;;;;;;;; next channel
+
+@no_song_data_read:
+	;; if this is a psg channel then update it
+
+	ld a,(cur_channel_id)
+	cp FIRST_PSG_CHANNEL
+	jr c,@no_psg
+	ld b,a
+	add a,<channel_ss
+	ld l,a
+	ld h,>channel_ss
+	ld a,(hl)
+	or a
+	jp p,@no_psg
+
+	ld a,(cur_song_slot_id)
+	ld c,a
+
+	ld a,PSG_NOISE_CHANNEL	;special case: if this channel is using tone2 noise mode and that is a different song slot then quit
+	cp b
+	jr nz,@set_psg
+	ld a,(channel_ss+PSG_CHANNEL_2)
+	cp c
+	jr z,@set_psg
+	ld a,(iy+chn.pitch)
+	cpl
+	and a,3
+	jr z,@no_psg
+@set_psg:
+	ld (hl),c
+	call set_psg_channel_volume
+	call set_psg_channel_pitch
+@no_psg:
+
+@next_chn:
+	ld a,(cur_channel_id)
+@next_chn_2:
+	ld de,CHN_DIST
+	add iy,de
+	inc a
+	cp SS_CHANNELS
+	jp c,@chn_loop
+
+	;;;;;;;;; next song slot
+
+	;; check lfo
+
+	ld a,(lfo_ss)
+	or a
+	jp p,@no_lfo
+	ld a,(ix+ss.lfo)
+	bit 3,a
+	jr z,@no_lfo
+	ld hl,FM1REG
+	wait_fm_ready_hl
+	ld (hl),$22
+	ld (FM1DATA),a
+	ld a,(cur_song_slot_id)
+	ld (lfo_ss),a
+@no_lfo:
+
+	;; go to next
+
+@next_song_slot:
+	ld a,(cur_song_slot_id)
+@next_song_slot_2:
+	ld de,-SS_DIST
+	add ix,de
 	dec a
 	jp p,@song_slot_loop
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; after song slot stuff
-	
-	
-	
-	
-	
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; handle special fm params
-	
-	exx
-	ld hl,$4000
-	exx
-	
-	;;;;;;;;;;;;;;; slot using chn3 controls its mode
-	
-	ld a,(k_fm_channel_ss+2)
-	cp $ff
-	jr z,@@no_chn3
-	call set_song_slot
-	
-	ld a,(ix+ss_flags)
-	and $40
-	ld (k_chn3_state),a
-	or $05
-	ld b,$27
-	rst fm_write_1
-	
-@@no_chn3:
-	
-	
-	;;;;;;;;;;;;;; slot controlling channel 6 controls the dac mode and sample freq
-	
-	ld a,(k_fm_channel_ss+5)
-	cp $ff
-	jr z,@@no_dac_mode
-	call set_song_slot
-	
-	ld a,(ix+ss_flags)
-	and $20
-	rlca
-	rlca
-	ld b,$2b
-	rst fm_write_1
-	
-	ld l,(ix+ss_sample_freq+0)
-	ld h,(ix+ss_sample_freq+1)
-	ld (k_sample_freq+0),hl
-	
-@@no_dac_mode:
-	
-	
-	
-	
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; write psg
-	
-	ld a,3
-	ld hl,k_psg_channel_ss+3
-@@psg_write_loop:
-	ld (k_temp),a ;channel id in k_temp
-	ld (k_temp+1),hl ;song slot id pointer in k_temp+1
-	rrca ;psg channel latch mask in k_temp+2
-	rrca
-	scf
-	rra
-	ld (k_temp+3),a
-	
+
+	;;;;; mute unused psg
+
+	ld hl,channel_ss+FIRST_PSG_CHANNEL+3
+	ld b,4
+@psg_mute_loop:
 	ld a,(hl)
 	or a
-	jp p,@@@do_it
-	
-	;not used channel, silence it
-	ld a,(k_temp+3)
-	or $1f
-	ld (PSG),a
-	jp @@next_psg_channel_2
-	
-@@@do_it:
-	call set_song_slot
-	ld a,(k_temp)
-	call iy_equals_ix_plus_a
-	
-	;output volume
-	ld a,(k_temp+3)
-	or $10
-	or (iy+ss_psg_volume)
-	xor $f
-	ld (PSG),a
-	
-	
-	;either noise mode or period, depending on channel
-	ld a,(k_temp)
-	cp 3
-	ld a,(iy+ss_psg_pitch_lo)
-	jr z,@@@is_noise
-	
-@@@is_tone:
-	ld hl,k_temp+3
-	ld b,a
-	and $0f
-	or (hl)
-	ld (PSG),a
-	
+	jp p,@@next
 	ld a,b
-	ld b,(iy+ss_psg_pitch_hi)
-	.rept 4
-		rr b
-		rra
-	.endr
-	ld (PSG),a
-	
-	jr @@@after_freq
-	
-@@@is_noise:
-	ld hl,k_prv_psg_noise
-	cp (hl)
-	jr z,+
-	ld (hl),a
-	or $e0
-	ld (PSG),a
-+:
-	
-	cpl ;for extended noise mode, disable tone 2 output, and always write tone2 freq of this song slot
-	and 3
-	jr nz,@@@after_freq
-	ld a,$ff
-	ld (k_psg_channel_ss+2),a
-	dec iy
-	ld a,$c0
-	ld (k_temp+3),a
-	ld a,(iy+ss_psg_pitch_lo)
-	jr @@@is_tone
-	
-	
-@@@after_freq:
-	
-	
-	
-@@next_psg_channel:
-	ld hl,(k_temp+1)
-@@next_psg_channel_2:
-	dec hl
-	ld a,(k_temp)
 	dec a
-	jp p,@@psg_write_loop
-	
-	
-	
-	
-	
-	jp main_loop
-	
+	rrca
+	rrca
+	rrca
+	or a,$9f
+	ld (PSG),a
+@@next:
+	dec l
+	djnz @psg_mute_loop
 
-
-
-
-	
-	
-	
-	
-	
-	
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; fm channel control routines
-
-	;;;;;; most of the following routines expect:
-	;;;;;;	the song slot id in k_song_slot
-	;;;;;;	the song slot pointer in ix
-	;;;;;;	the channel id in k_fm_channel
-	;;;;;;	the channel-indexed pointer in iy
-	
-	
-	
-	;sets up shadow regs and returns channel index in A
-init_fm_channel_write:
-	exx
-	ld hl,$4000
-	ld b,h
-	ld d,h
-	
-	ld c,l
-	ld e,1
-	
-	ld a,(k_fm_channel)
-	cp 3
-	jr c,+
-	ld c,2
-	ld e,3
-	sub 3
-+:
-	exx
-	ret
-	
-	
-	
-	;in A
-get_fm_keyoff_index:
-	ld a,(k_fm_channel)
-	cp 3
-	ret c
-	inc a
-	ret
-	
-	
-	
-	
-	
-	
-	;in A
-stop_song_slot:
-	call set_song_slot
-	
-stop_current_song_slot:
-	ld (ix+ss_call_stack_index),0
-	
-	
-pause_current_song_slot:
-	res SS_FLAG_ON,(ix+ss_flags)
-	
-	
-give_up_channels:
-	;;;; FM channels
-	
-	ld iy,(k_song_slot_ptr)
-	ld hl,k_fm_channel_ss
-	xor a
-@loop:
-	ld (k_fm_channel),a
-	
-	ld a,(k_song_slot) ; the channel must be ours
-	cp (hl)
-	jr nz,@next
-	
-	ld (hl),$ff ;signal this channel is free
-	
-	call mute_fm_channel
-	
-	
-	ld a,(k_fm_channel) ;for channel 6, stop sample
-	sub 5
-	jr nz,+
-	ld (k_sample_active),a ;0
-+:
-	
-	
-@next:
-	inc hl
-	inc iy
-	ld a,(k_fm_channel)
-	inc a
-	cp 6
-	jr c,@loop
-	
-	
-	
-	.endasm
-	;;;; PSG
-	xor a
-	ld (ix+ss_psg_volume+0),a
-	ld (ix+ss_psg_volume+1),a
-	ld (ix+ss_psg_volume+2),a
-	ld (ix+ss_psg_volume+3),a
-	.asm
-	
-	
-	
-	ret
-	
-	
-	
-	
-	
-	
-mute_fm_channel:
-	;; mute the channel by setting its RRs to $0f and keying it off
-	call init_fm_channel_write
-	or $80
-	ld b,a
-	ld a,$ff
-	.rept 3
-		rst fm_write
-		inc b
-		inc b
-		inc b
-		inc b
-	.endr
-	rst fm_write
-	
-	call get_fm_keyoff_index
-	ld b,$28
-	rst fm_write_1
-	
-	ret
-	
-	
-	
-	
-	
-	
-	
-	
-write_fm_patch:
-	ld e,(iy+ss_fm_patch_lo)
-	ld d,(iy+ss_fm_patch_hi)
-	ld hl,(fm_patch_tbl_base)
-	ld a,(fm_patch_tbl_base+2)
-	call indexed_read_68k_ptr
-	
-	call init_fm_channel_write
-	or $30
-	ld b,a
-	
-	.rept (4*7)-1
-		rst get_byte
-		rst fm_write
-		inc b
-		inc b
-		inc b
-		inc b
-	.endr
-	rst get_byte
-	rst fm_write
-	ld a,b
-	add $14
-	ld b,a
-	rst get_byte
-	rst fm_write
-	inc b
-	inc b
-	inc b
-	inc b
-	rst get_byte
-	rst fm_write
-	
-	ret
-	
-
-
-
-write_fm_freq:
-	call init_fm_channel_write
-	or $a4
-	ld b,a
-	
-	ld a,(iy+ss_fm_pitch_hi)
-	rst fm_write
-	dec b
-	dec b
-	dec b
-	dec b
-	ld a,(iy+ss_fm_pitch_lo)
-	rst fm_write
-	
-	ret
-	
-	
-	
-	;on entry to this routine, k_fm_channel is the operator, not the channel
-write_fm_3freq:
-	call init_fm_channel_write
-	or $ac
-	ld b,a
-	
-	ld a,(iy+ss_chn3_pitch_hi)
-	rst fm_write
-	dec b
-	dec b
-	dec b
-	dec b
-	ld a,(iy+ss_chn3_pitch_lo)
-	rst fm_write
-	
-	ret
-	
-	
-	
-	
-write_fm_keyon:
-	exx
-	ld hl,$4000
-	exx
-	
-	call get_fm_keyoff_index
-	or (iy+ss_fm_keyon)
-	ld b,$28
-	rst fm_write_1
-	
 	ret
 
 
@@ -1645,103 +1561,6 @@ write_fm_keyon:
 
 
 
-
-
-
-
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; misc routines
-
-	
-	
-step_ptr_ahl:
-	ld c,a
-	;add de to banked pointer chl, then set the bank
-step_ptr:
-	add hl,de
-	jr nc,+
-	inc c
-	ld de,$8000
-	add hl,de
-	jr nc,+
-	inc c
-	set 7,h
-+:	jp set_bank
-
-
-
-	;read 68k pointer indirect from (banked ahl)+(de*4)+1
-indexed_read_68k_ptr:
-	ex de,hl
-	add hl,hl
-	add hl,hl
-	inc hl
-	ex de,hl
-	call step_ptr_ahl
-	
-	;read 68k pointer from banked pointer chl, convert into chl, then set bank
-read_68k_ptr:
-	rst get_byte
-	ld b,a
-	rst get_byte
-	ld d,a
-	rst get_byte
-	ld l,a
-	ld a,d
-	rlca
-	rl b
-	set 7,d
-	ld h,d
-	ld c,b
-	jp set_bank
-
-
-
-
-
-	;to A
-set_song_slot:
-	ld (k_song_slot),a
-	add a,>k_song_slots
-	ld ixh,a
-	ld ixl,0
-	ld (k_song_slot_ptr),ix
-	ret
-
-
-
-	;song slots are page-aligned so no upper byte adjustment
-iy_equals_ix_plus_a:
-	add ixl
-	ld iyl,a
-	;ld a,0
-	;adc ixh
-	;ld iyh,a
-	ret
-
-
-
-
-
-
-
-
-
-
-
-	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; data
-	
-	
-frame_timer_tbl:
-	.redefine idx 1
-	.rept $20
-		.dw NTSC_INTERVAL*idx
-		.redefine idx idx+1
-	.endr
-	.redefine idx 1
-	.rept $20
-		.dw PAL_INTERVAL*idx
-		.redefine idx idx+1
-	.endr
 
 
 

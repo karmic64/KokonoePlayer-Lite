@@ -62,6 +62,7 @@ const unsigned char command_size_tbl[0x100] = {
 
 
 #define min(a,b) (((a) < (b)) ? (a) : (b))
+#define max(a,b) (((a) > (b)) ? (a) : (b))
 
 #define CHANNELS 10
 #define FM_CHANNELS 6
@@ -70,6 +71,7 @@ const unsigned char command_size_tbl[0x100] = {
 #define FIRST_PSG_CHANNEL 6
 #define FM_CHN3 2
 #define FM_DAC_CHANNEL 5
+#define PSG_CHANNEL_2 8
 #define PSG_NOISE_CHANNEL 9
 
 /* see vgm spec */
@@ -78,12 +80,12 @@ const unsigned char command_size_tbl[0x100] = {
 
 /* for NTSC, but PAL isn't different enough to worry about it */
 #define Z80_CLOCK 3579545.0
-#define Z80_CLOCKS_PER_SAMPLE 104.0
+#define Z80_CLOCKS_PER_SAMPLE 91.0
 
 
 
-/* indexed_read_68k_ptr accepts a 16-bit id, and shifts out the upper 2 bits */
-#define MAX_SONGS 0x4000
+/* bank size is 0x8000, song id is left-shifted twice */
+#define MAX_SONGS 0x2000
 
 /* k_sample_init_id is 1 byte long (this could be trivially fixed if a need ever arises */
 #define MAX_SAMPLES 0x100
@@ -320,7 +322,7 @@ void flush_queued_wait(song_t * s, playback_state_t * state, int chn) {
 
 	while (waits) {
 		int this_wait = min(waits, 0x80);
-		write_song_command(&s->sequences[chn], (waits-1), 0);
+		write_song_command(&s->sequences[chn], (this_wait-1), 0);
 		waits -= this_wait;
 	}
 }
@@ -457,6 +459,8 @@ MAKE_ADD_FUNC(add_song, song_t, song_tbl, songs, songs_max, 0x20, song_cmp)
 
 
 /************************* main load_vgm function *************************/
+
+int max_sample_freq = 0;	// this will determine the 0-padding after every sample
 
 #define GET_VGM_BYTE(var) \
 	int var = fgetc(vgm_f); \
@@ -661,6 +665,9 @@ int load_vgm(char * vgm_filename, int base_interval)
 				if (freq != state.sample_freq) {
 					state.sample_freq = freq;
 					write_song_chn_command(&song, &state, FM_DAC_CHANNEL, 0xf9, freq);
+					if (freq > max_sample_freq) {
+						max_sample_freq = freq;
+					}
 				}
 			}
 		} else if (cmd == 0x94) {	// stop stream
@@ -940,9 +947,10 @@ int load_vgm(char * vgm_filename, int base_interval)
 				int8_t * prv = &state.psg.chn[chn].volume;
 				int new = second_data < 0 ? val : second_data;
 				new &= 0x0f;
+				new ^= 0x0f;
 
 				if (*prv != new) {
-					if (new != 0x0f) {
+					if (new) {
 						song.sequences_used[chn+FIRST_PSG_CHANNEL] |= PSG_USED_NZ_VOL;
 					}
 					write_song_chn_command(&song, &state, chn+FIRST_PSG_CHANNEL, 0xe0 + new, 0);
@@ -963,6 +971,13 @@ int load_vgm(char * vgm_filename, int base_interval)
 				int hi = (new>>8) & 3;
 				write_song_chn_pitch_change(&song, &state, chn+FIRST_PSG_CHANNEL, lo, hi);
 			}
+
+			// special case: if the noise channel is using tone2-mode, then tone 2 channel is always used
+			if (song.sequences_used[PSG_CHANNEL_2] != PSG_USED && song.sequences_used[PSG_NOISE_CHANNEL] == PSG_USED) {
+				if (state.psg.chn[3].volume > 0 && (state.psg.chn[3].freq.lo & 3) == 3) {
+					song.sequences_used[PSG_CHANNEL_2] = PSG_USED;
+				}
+			}
 		}
 		/********************* BAD COMMANDS *********************/
 		else if (cmd >= 0x30 && cmd < 0x51)
@@ -982,11 +997,17 @@ int load_vgm(char * vgm_filename, int base_interval)
 		}
 	}
 
-	
-	
-	
-	
-	
+	int used_channels = 0;
+	for (int i = 0; i < CHANNELS; i++) {
+		if (song_channel_is_used(&song, i)) {
+			used_channels++;
+			break;
+		}
+	}
+	if (!used_channels) {
+		puts("No used channels were detected. This song will not be added.");
+		goto load_vgm_fail;
+	}
 	
 	/********************************** final ending *****************************/
 	
@@ -1065,9 +1086,9 @@ load_vgm_cleanup:
 #define SEQUENCE_NONE (~(size_t)0)
 
 #define CALL_SIZE 4
-#define INLINE_THRESHOLD 4	// subroutines <= this size are never created
+#define INLINE_THRESHOLD 5	// subroutines <= this size are never created
 
-#define CALL_NEST_LIMIT (31/3)
+#define CALL_NEST_LIMIT (32/3)
 
 /////////////////////// pair (all pairs in data, used when building the dictionary)
 
@@ -1341,6 +1362,7 @@ typedef struct {
 	size_t sequence_index;	// index in sequence relative to left
 	size_t sequence_size;	// size of the sequence starting from here
 	size_t sequence_call_count;	// amount of times the sequence is called from here (NOT inlined)
+	size_t sequence_call_level;	// amount of nest levels deep we would be in calling from here
 } song_command_pair_dict_t;
 
 typedef struct {
@@ -1348,7 +1370,7 @@ typedef struct {
 	size_t right;	// rightmost pair id in dictionary
 	size_t length;	// length of the sequence in dictionary entries (command length is this + 1)
 	size_t minimum_eligible_index;	// first index of the sequence that can be turned into a subroutine
-	size_t call_level;	// how many nested subroutines deep calling this sequence would result in
+	size_t maximum_eligible_index;
 } song_command_pair_dict_sequence_t;
 
 
@@ -1358,11 +1380,28 @@ size_t first_label_id = 0;	// first label id that can be used by subroutines
 
 song_command_sequence_t compressed_song_data;
 
-int write_compressed_call_command(song_command_sequence_t * song, song_command_pair_dict_t * dict_tbl, song_command_pair_dict_sequence_t * seq_tbl, size_t di, size_t * size_ptr, int is_end);	// forward-declare
+int write_compressed_call_command(
+	song_command_sequence_t * song
+	,song_command_pair_dict_t * dict_tbl
+	,song_command_pair_dict_sequence_t * seq_tbl
+	,size_t di
+	,size_t * size_ptr
+	,int is_subroutine_body
+	,int is_subroutine_end
+);	// forward-declare
 
-int write_compressed_song_command(song_command_sequence_t * song, song_command_pair_dict_t * dict_tbl, song_command_pair_dict_sequence_t * seq_tbl, unsigned cmd, unsigned param, size_t * size_ptr, int is_end) {
+int write_compressed_song_command(
+	song_command_sequence_t * song
+	,song_command_pair_dict_t * dict_tbl
+	,song_command_pair_dict_sequence_t * seq_tbl
+	,unsigned cmd
+	,unsigned param
+	,size_t * size_ptr
+	,int is_subroutine_body
+	,int is_subroutine_end
+) {
 	if (cmd == CALL_CMD) {
-		return write_compressed_call_command(song, dict_tbl, seq_tbl, param, size_ptr, is_end);
+		return write_compressed_call_command(song, dict_tbl, seq_tbl, param, size_ptr, is_subroutine_body, is_subroutine_end);
 	} else if (cmd < 0x100) {
 		write_song_command(song, cmd, param);
 		*size_ptr += command_size_tbl[cmd];
@@ -1370,28 +1409,39 @@ int write_compressed_song_command(song_command_sequence_t * song, song_command_p
 	return 0;
 }
 
-int write_compressed_call_command(song_command_sequence_t * song, song_command_pair_dict_t * dict_tbl, song_command_pair_dict_sequence_t * seq_tbl, size_t di, size_t * size_ptr, int is_end) {
+int write_compressed_call_command(
+	song_command_sequence_t * song
+	,song_command_pair_dict_t * dict_tbl
+	,song_command_pair_dict_sequence_t * seq_tbl
+	,size_t di
+	,size_t * size_ptr
+	,int is_subroutine_body
+	,int is_subroutine_end
+) {
 	song_command_pair_dict_t * d = &dict_tbl[di];
 	song_command_pair_dict_sequence_t * s = &seq_tbl[d->sequence_id];
 
-	if (s->minimum_eligible_index == SEQUENCE_NONE || s->call_level >= CALL_NEST_LIMIT || d->sequence_size <= INLINE_THRESHOLD) {
+	if (
+		s->minimum_eligible_index == SEQUENCE_NONE
+		|| d->sequence_index > s->maximum_eligible_index
+	) {
 		// sequence is not subroutine-eligible at all, just inline it
 		for (size_t i = d->sequence_index; i < s->length; i++) {
-			write_compressed_song_command(song, dict_tbl, seq_tbl, d->pair[0].cmd, d->pair[0].param, size_ptr, 0);
+			write_compressed_song_command(song, dict_tbl, seq_tbl, d->pair[0].cmd, d->pair[0].param, size_ptr, is_subroutine_body, 0);
 			if (i < s->length-1) {
 				d = &dict_tbl[d->pair[1].param];
 			}
 		}
-		write_compressed_song_command(song, dict_tbl, seq_tbl, d->pair[1].cmd, d->pair[1].param, size_ptr, 0);
+		write_compressed_song_command(song, dict_tbl, seq_tbl, d->pair[1].cmd, d->pair[1].param, size_ptr, is_subroutine_body, 0);
 		return 0;
 	} else {
-		// subroutine is eligible, inline until we hit the eligible index then emit a call
+		// subroutine is eligible, inline until we hit an eligible index then emit a call
 		for (size_t i = d->sequence_index; i < s->minimum_eligible_index; i++) {
-			write_compressed_song_command(song, dict_tbl, seq_tbl, d->pair[0].cmd, d->pair[0].param, size_ptr, 0);
+			write_compressed_song_command(song, dict_tbl, seq_tbl, d->pair[0].cmd, d->pair[0].param, size_ptr, is_subroutine_body, 0);
 			di = d->pair[1].param;
 			d = &dict_tbl[di];
 		}
-		write_compressed_song_command(song, dict_tbl, seq_tbl, is_end ? 0xfd : 0xfe, di + first_label_id, size_ptr, is_end);
+		write_compressed_song_command(song, dict_tbl, seq_tbl, is_subroutine_end ? 0xfd : 0xfe, di + first_label_id, size_ptr, is_subroutine_body, is_subroutine_end);
 		return 1;
 	}
 }
@@ -1438,8 +1488,8 @@ void compress_song_data(int max_iterations, unsigned pair_freq_threshold) {
 
 	// begin main iteration loop of finding most common pair and replacing sequences
 	int iter = 0;
-	song_command_pair_dict_t * dict_tbl = malloc(0x10000 * sizeof(*dict_tbl));
-	size_t dict_max = 0x10000;
+	song_command_pair_dict_t * dict_tbl = malloc(0x1000 * sizeof(*dict_tbl));
+	size_t dict_max = 0x1000;
 	size_t dict_length = 0;
 	int fib[3] = {0,1,1};
 	while ((max_iterations < 0 || iter < max_iterations) && pair_list.highest_pair_freq >= pair_freq_threshold) {
@@ -1477,11 +1527,12 @@ void compress_song_data(int max_iterations, unsigned pair_freq_threshold) {
 					ref_dict->left_refs++;
 					ref_dict->left_from = di;
 				}
-			} else {
+			} else if (cmd < 0x100) {
 				this_dict->raw_size += command_size_tbl[cmd];
 			}
 		}
 		this_dict->sequence_id = SEQUENCE_NONE;
+		this_dict->sequence_call_level = SEQUENCE_NONE;
 
 		// replace all instances of the pair with a single value and recalculate the pairs
 		unsigned instances_left = p->freq;	// keep a separate counter, as the pointer is deleted when all instances are removed
@@ -1524,8 +1575,6 @@ void compress_song_data(int max_iterations, unsigned pair_freq_threshold) {
 				instances_left--;
 			}
 		}
-
-		dict_length++;
 	}
 	if (pair_list.highest_pair_freq >= pair_freq_threshold) {
 		printf("hit %d-iteration limit.\n", iter);
@@ -1656,14 +1705,11 @@ void compress_song_data(int max_iterations, unsigned pair_freq_threshold) {
 	size_t eligible_subroutines = 0;
 	for (size_t si = 0; si < seqs; si++) {
 		song_command_pair_dict_sequence_t * s = &seq_tbl[si];
-		s->minimum_eligible_index = SEQUENCE_NONE;
 		size_t di = s->left;
 		size_t i = 0;
 		while (1) {
 			song_command_pair_dict_t * d = &dict_tbl[di];
 			if (d->sequence_call_count > 1 && d->sequence_size > INLINE_THRESHOLD) {
-				s->minimum_eligible_index = i;
-				s->call_level = SEQUENCE_NONE;
 				eligible_subroutines++;
 				break;
 			}
@@ -1677,65 +1723,116 @@ void compress_song_data(int max_iterations, unsigned pair_freq_threshold) {
 	printf("%zu eligible subroutines...", eligible_subroutines);
 	fflush(stdout);
 
-	// go through the eligible subroutines and set their "call level"
-	// subroutines with call levels higher than the nest limit are not eligible
-	size_t unknown_call_levels = eligible_subroutines;
-	for (int iter = 0; iter <= CALL_NEST_LIMIT && unknown_call_levels; iter++) {
+	// find call levels
+	size_t unknown_call_levels = seqs;
+	unsigned char * known_call_levels = malloc((seqs+7)/8);
+	memset(known_call_levels, 0, (seqs+7)/8);
+
+	while (unknown_call_levels) {
 		for (size_t si = 0; si < seqs; si++) {
 			song_command_pair_dict_sequence_t * s = &seq_tbl[si];
-			if (s->minimum_eligible_index != SEQUENCE_NONE && s->call_level == SEQUENCE_NONE) {
-				size_t di = s->left;
-				size_t i = 0;
-				while (i < s->minimum_eligible_index) {
-					di = dict_tbl[di].pair[1].param;
-					i++;
-				}
+			if (!(known_call_levels[si/8] & (1<<(si%8)))) {
+				size_t di = s->right;
+				size_t call_level = 0;
 
-				int calls = 0;
-				size_t max_call_level = 0;
 				while (1) {
 					song_command_pair_dict_t * d = &dict_tbl[di];
-					for (int i = 0; i < (di==s->right ? 2 : 1); i++) {
-						if (d->pair[i].cmd == CALL_CMD) {
-							song_command_pair_dict_t * dref = &dict_tbl[d->pair[i].param];
-							song_command_pair_dict_sequence_t * sref = &seq_tbl[dref->sequence_id];
-							if (sref->minimum_eligible_index != SEQUENCE_NONE && dref->sequence_index >= sref->minimum_eligible_index) {
-								if (sref->call_level == SEQUENCE_NONE)
-									goto sub_call_level_unknown;
 
-								calls++;
-								if (sref->call_level > max_call_level) {
-									max_call_level = sref->call_level;
-								}
+					size_t pair_call_level = 0;
+					for (int i = (di == s->right ? 1 : 0); i >= 0; i--) {
+						unsigned cmd = d->pair[i].cmd;
+						unsigned param = d->pair[i].param;
+
+						if (cmd == CALL_CMD) {
+							song_command_pair_dict_t * dref = &dict_tbl[param];
+							if (dref->sequence_call_level == SEQUENCE_NONE)
+								goto next_seq_call_level;
+
+							int is_inline_call = dref->sequence_call_count <= 1 || dref->sequence_size <= INLINE_THRESHOLD;
+							size_t this_call_level = dref->sequence_call_level + (is_inline_call ? 0 : 1);
+							if (this_call_level > pair_call_level) {
+								pair_call_level = this_call_level;
 							}
 						}
 					}
 
-					if (di == s->right)
+					if (pair_call_level > call_level) {
+						call_level = pair_call_level;
+					}
+					d->sequence_call_level = call_level;
+
+					if (di == s->left)
 						break;
-					di = d->pair[1].param;
+					di = d->right_from;
 				}
 
-				s->call_level = calls ? max_call_level + 1 : 0;
-				if (s->call_level >= CALL_NEST_LIMIT) {
-					eligible_subroutines--;
-				}
 				unknown_call_levels--;
+				known_call_levels[si/8] |= (1<<(si%8));
+				if (!unknown_call_levels) {
+					goto done_all_seq_call_level;
+				}
 			}
-sub_call_level_unknown:;
+next_seq_call_level:;
 		}
 	}
-	if (unknown_call_levels) {
-		for (size_t si = 0; si < seqs; si++) {
-			song_command_pair_dict_sequence_t * s = &seq_tbl[si];
-			if (s->call_level == SEQUENCE_NONE) {
-				eligible_subroutines--;
+done_all_seq_call_level:;
+
+	free(known_call_levels);
+	known_call_levels = NULL;
+
+	// make a pass through the sequences and remove any calls which are past the nest limit
+	for (size_t si = 0; si < seqs; si++) {
+		song_command_pair_dict_sequence_t * s = &seq_tbl[si];
+		size_t di = s->left;
+		while (1) {
+			song_command_pair_dict_t * d = &dict_tbl[di];
+			if (d->sequence_call_level >= CALL_NEST_LIMIT) {
+				for (int i = 0; i < (di == s->right ? 2 : 1); i++) {
+					unsigned cmd = d->pair[i].cmd;
+					unsigned param = d->pair[i].param;
+
+					if (cmd == CALL_CMD) {
+						song_command_pair_dict_t * dref = &dict_tbl[param];
+						if (dref->sequence_size > INLINE_THRESHOLD) {
+							dref->sequence_call_count--;
+						}
+					}
+				}
 			}
+
+			if (di == s->right)
+				break;
+			di = d->pair[1].param;
 		}
 	}
 
-	printf("%zu after nest limit filter.\n", eligible_subroutines);
+	// re-evaluate eligible subroutines
+	eligible_subroutines = 0;
+	for (size_t si = 0; si < seqs; si++) {
+		song_command_pair_dict_sequence_t * s = &seq_tbl[si];
+		s->minimum_eligible_index = SEQUENCE_NONE;
+		s->maximum_eligible_index = SEQUENCE_NONE;
+		size_t di = s->left;
+		size_t i = 0;
+		while (1) {
+			song_command_pair_dict_t * d = &dict_tbl[di];
+			if (d->sequence_call_count > 1 && d->sequence_size > INLINE_THRESHOLD && d->sequence_call_level < CALL_NEST_LIMIT) {
+				if (s->minimum_eligible_index == SEQUENCE_NONE) {
+					s->minimum_eligible_index = i;
+					eligible_subroutines++;
+				}
+				s->maximum_eligible_index = i;
+			}
+			if (di == s->right) {
+				break;
+			}
+			di = d->pair[1].param;
+			i++;
+		}
+	}
+	printf("%zu after nest limit elimination.\n", eligible_subroutines);
 	fflush(stdout);
+
 
 
 	///////////////////////////////////////////// PHASE 3: build the final compressed data
@@ -1769,9 +1866,9 @@ sub_call_level_unknown:;
 		if (cmd == END_CMD) {
 			size_t loop_label = song_tbl[song_id].sequence_loop_label_ids[chn_id];
 			if (loop_label == SEQUENCE_NONE) {
-				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, 0xff, 0, &compressed_song_data_size, 0);
+				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, 0xff, 0, &compressed_song_data_size, 0, 0);
 			} else {
-				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, 0xfd, loop_label, &compressed_song_data_size, 0);
+				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, 0xfd, loop_label, &compressed_song_data_size, 0, 0);
 			}
 
 			write_song_label = 1;
@@ -1779,7 +1876,7 @@ sub_call_level_unknown:;
 			size_t loop_label = song_tbl[song_id].sequence_loop_label_ids[chn_id];
 			write_song_command(&compressed_song_data, LAB_CMD, loop_label);
 		} else {
-			write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, cmd, param, &compressed_song_data_size, 0);
+			write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, cmd, param, &compressed_song_data_size, 0, 0);
 		}
 	}
 
@@ -1787,7 +1884,7 @@ sub_call_level_unknown:;
 	for (size_t si = 0; si < seqs; si++) {
 		song_command_pair_dict_sequence_t * s = &seq_tbl[si];
 		size_t di = s->left;
-		if (s->minimum_eligible_index != SEQUENCE_NONE && s->call_level < CALL_NEST_LIMIT) {
+		if (s->minimum_eligible_index != SEQUENCE_NONE) {
 			// step until we hit the minimum eligible index
 			for (size_t i = 0; i < s->minimum_eligible_index; i++) {
 				di = dict_tbl[di].pair[1].param;
@@ -1800,15 +1897,15 @@ sub_call_level_unknown:;
 					write_song_command(&compressed_song_data, LAB_CMD, di + first_label_id);
 				}
 
-				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, d->pair[0].cmd, d->pair[0].param, &compressed_song_data_size, 0);
+				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, d->pair[0].cmd, d->pair[0].param, &compressed_song_data_size, 1, 0);
 
 				if (di == s->right)
 					break;
 				di = d->pair[1].param;
 				d = &dict_tbl[di];
 			}
-			if (!write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, d->pair[1].cmd, d->pair[1].param, &compressed_song_data_size, 1))
-				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, 0xff, 0, &compressed_song_data_size, 0);
+			if (!write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, d->pair[1].cmd, d->pair[1].param, &compressed_song_data_size, 1, 1))
+				write_compressed_song_command(&compressed_song_data, dict_tbl, seq_tbl, 0xff, 0, &compressed_song_data_size, 1, 0);
 		}
 	}
 
@@ -1903,22 +2000,15 @@ int main(int argc, char *argv[])
 		for (int i = 0; i < 75; i++) putchar('-');
 		putchar('\n');
 	}
-
-	compress_song_data(max_iterations, pair_freq_threshold);
 	
 	
-	/********* report ********************/
+	/********* check ********************/
 	printf("\n%zu songs, %zu samples.\n",songs,samples);
 	if (!songs)
 	{
 		puts("No valid songs, quitting.");
 		return EXIT_FAILURE;
 	}
-	
-	size_t total_size = songs_size+samples_size;
-	printf("Song data: %zu bytes, samples: %zu bytes.\n"
-		,songs_size,samples_size);
-	printf("Total size: %zu bytes (%.1f KiB).\n", total_size,total_size/1024.0);
 	
 	int toomany = 0;
 	if (songs > MAX_SONGS)
@@ -1932,10 +2022,17 @@ int main(int argc, char *argv[])
 		toomany++;
 	}
 	if (toomany) return EXIT_FAILURE;
+
+	compress_song_data(max_iterations, pair_freq_threshold);
 	
 	
 	
 	/******************************** OUTPUT FILE ***********************************/
+	size_t total_size = songs_size+samples_size;
+	printf("Song data: %zu bytes, samples: %zu bytes.\n"
+	,songs_size,samples_size);
+	printf("Total size: %zu bytes (%.1f KiB).\n", total_size,total_size/1024.0);
+
 	FILE *f = fopen(out_name,"w");
 	if (!f)
 	{
@@ -1950,23 +2047,31 @@ int main(int argc, char *argv[])
 	
 	/************** song data streams ****************/
 	/***** pointers *****/
-	fprintf(f,"\n\n; Song data streams.\n align 1\nknl_song_tbl:\n");
+	fprintf(f,"\n\n; Song data streams.\n align 1\nknl_song_tbl: dl ");
+	for (size_t i = 0; i < songs; i++)
+	{
+		fprintf(f,"knl_song_header_%zu", i);
+		if (i < songs-1) {
+			fputc(',', f);
+		}
+	}
 	for (size_t i = 0; i < songs; i++)
 	{
 		const song_t * s = &song_tbl[i];
-		fprintf(f,"\tdl ");
+		fprintf(f,"\nknl_song_header_%zu: dl ", i);
+		int used_channels = 0;
 		for (int j = 0; j < CHANNELS; j++) {
 			size_t label = s->sequence_label_ids[j];
 			if (label == SEQUENCE_NONE) {
-				fputc('0',f);
+
 			} else {
-				fprintf(f,"knl_lab_%zu",label);
-			}
-			if (j < 9) {
-				fputc(',', f);
+				if (used_channels++) {
+					fputc(',', f);
+				}
+				fprintf(f,"(%d<<24)+knl_lab_%zu",j,label);
 			}
 		}
-		fputc('\n', f);
+		fprintf(f,"\n\tdb $ff");
 	}
 	
 	/***** actual data *****/
@@ -1995,6 +2100,8 @@ int main(int argc, char *argv[])
 	
 	
 	/************** samples ****************/
+	int sample_padding = (max_sample_freq + 0x101) / 0x100;
+
 	/***** pointers *****/
 	fprintf(f,"\n\n; Samples.\n align 1\nknl_sample_tbl:");
 	if (samples)
@@ -2022,10 +2129,10 @@ int main(int argc, char *argv[])
 			
 			/* end marker */
 			fputc(' ',f);
-			for (int j = 0; j < 0x100; j++)
+			for (int j = 0; j < sample_padding; j++)
 			{
 				fputc('0',f);
-				if (j < 0xff) fputc(',',f);
+				if (j < sample_padding-1) fputc(',',f);
 			}
 		}
 	}

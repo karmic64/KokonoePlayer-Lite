@@ -3,11 +3,13 @@ Z80 = $a00000
 Z80BUSREQ = $a11100
 Z80RESET = $a11200
 
+PSG = $c00011
 
 
-	offset Z80+$1ef0
+
+	offset Z80+$1ef8
 z80_comm_index ds.b 1
-z80_base_pointers ds.b 3*3
+z80_base_pointers ds.b 3*2
 
 
 
@@ -17,7 +19,7 @@ z80_comm_buf = Z80+$1f00
 
 	section .text,code
 	
-	db "KokonoePlayer-Lite v0.98 coded by karmic"
+	db "KokonoePlayer-Lite v1.00 coded by karmic"
 	align 1
 	
 	
@@ -38,6 +40,12 @@ knl_reset::
 	move.w d0,(a2) ;reset on
 	move.w d1,(a1) ;busreq on
 	move.w d1,(a2) ;reset off
+
+	lea PSG,a3
+	move.b #$9f,(a3)
+	move.b #$bf,(a3)
+	move.b #$df,(a3)
+	move.b #$ff,(a3)
 	
 .waitready:
 	btst.b #0,(a1)
@@ -90,7 +98,7 @@ knl_reset::
 	
 	
 z80_pointer_table:
-	dl knl_song_tbl,knl_fm_patch_tbl,knl_sample_tbl
+	dl knl_song_tbl,knl_sample_tbl
 z80_pointer_table_end:
 	
 	
@@ -164,6 +172,7 @@ knl_init::
 	
 	
 knl_stop::
+knl_pause::
 	cargs #4, .arg_song_slot.l
 	bsr z80_enter
 	
@@ -177,25 +186,11 @@ knl_stop::
 	
 	
 	
-knl_pause::
-	cargs #4, .arg_song_slot.l
-	bsr z80_enter
-	
-	z80_comm #2 * 2
-	
-	z80_comm .arg_song_slot+3(sp)
-	
-	bra z80_exit
-	
-	
-	
-	
-	
 knl_resume::
 	cargs #4, .arg_song_slot.l
 	bsr z80_enter
 	
-	z80_comm #3 * 2
+	z80_comm #2 * 2
 	
 	z80_comm .arg_song_slot+3(sp)
 	
